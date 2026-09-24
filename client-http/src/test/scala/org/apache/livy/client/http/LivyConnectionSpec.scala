@@ -18,7 +18,6 @@
 package org.apache.livy.client.http
 
 import java.io.IOException
-import java.net.URLEncoder
 import java.nio.charset.StandardCharsets.UTF_8
 
 import org.apache.http.client.utils.URIBuilder
@@ -26,14 +25,16 @@ import org.eclipse.jetty.security._
 import org.eclipse.jetty.security.UserStore
 import org.eclipse.jetty.security.authentication.BasicAuthenticator
 import org.eclipse.jetty.util.security._
-import org.scalatest.{BeforeAndAfterAll, FunSpecLike}
-import org.scalatest.Matchers._
+import org.scalatest.BeforeAndAfterAll
+import org.scalatest.funspec.AnyFunSpecLike
+import org.scalatest.matchers.should.Matchers._
 import org.scalatra.servlet.ScalatraListener
 
 import org.apache.livy.{LivyBaseUnitTestSuite, LivyConf}
+import org.apache.livy.client.common.TestUtils
 import org.apache.livy.server.WebServer
 
-class LivyConnectionSpec extends FunSpecLike with BeforeAndAfterAll with LivyBaseUnitTestSuite {
+class LivyConnectionSpec extends AnyFunSpecLike with BeforeAndAfterAll with LivyBaseUnitTestSuite {
   describe("LivyConnection") {
     def basicAuth(username: String, password: String, realm: String): SecurityHandler = {
       val roles = Array("user")
@@ -65,7 +66,7 @@ class LivyConnectionSpec extends FunSpecLike with BeforeAndAfterAll with LivyBas
     def test(password: String, livyConf: LivyConf = new LivyConf()): Unit = {
       val username = "user name"
 
-      val server = new WebServer(livyConf, "0.0.0.0", 0)
+      val server = new WebServer(livyConf, TestUtils.TEST_BIND_HOST, 0)
       server.context.setSecurityHandler(basicAuth(username, password, "realm"))
       server.context.setResourceBase("src/main/org/apache/livy/server")
       server.context.setInitParameter(ScalatraListener.LifeCycleKey,
@@ -73,12 +74,11 @@ class LivyConnectionSpec extends FunSpecLike with BeforeAndAfterAll with LivyBas
       server.context.addEventListener(new ScalatraListener)
       server.start()
 
-      val utf8Name = UTF_8.name()
       val uri = new URIBuilder()
         .setScheme(server.protocol)
         .setHost(server.host)
         .setPort(server.port)
-        .setUserInfo(URLEncoder.encode(username, utf8Name), URLEncoder.encode(password, utf8Name))
+        .setUserInfo(username, password)
         .build()
       info(uri.toString)
       val conn = new LivyConnection(uri, new HttpConf(null))
@@ -95,6 +95,10 @@ class LivyConnectionSpec extends FunSpecLike with BeforeAndAfterAll with LivyBas
 
     it("should support HTTP auth with password") {
       test("pass:word")
+    }
+
+    it("should support HTTP auth with password containing plus") {
+      test("p+w")
     }
 
     it("should support HTTP auth with empty password") {

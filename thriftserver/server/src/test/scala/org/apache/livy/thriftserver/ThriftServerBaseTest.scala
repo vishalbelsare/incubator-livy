@@ -20,10 +20,13 @@ package org.apache.livy.thriftserver
 import java.sql.{Connection, DriverManager, Statement}
 
 import org.apache.hive.jdbc.HiveDriver
-import org.scalatest.{BeforeAndAfterAll, FunSuite}
+import org.scalatest.BeforeAndAfterAll
+import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.livy.LivyConf
 import org.apache.livy.LivyConf.{LIVY_SPARK_SCALA_VERSION, LIVY_SPARK_VERSION}
+import org.apache.livy.client.common.TestUtils
+import org.apache.livy.rsc.RSCConf
 import org.apache.livy.server.AccessManager
 import org.apache.livy.server.recovery.{SessionStore, StateStore}
 import org.apache.livy.sessions.InteractiveSessionManager
@@ -33,7 +36,7 @@ object ServerMode extends Enumeration {
   val binary, http = Value
 }
 
-abstract class ThriftServerBaseTest extends FunSuite with BeforeAndAfterAll {
+abstract class ThriftServerBaseTest extends AnyFunSuite with BeforeAndAfterAll {
   def mode: ServerMode.Value
   def port: Int
 
@@ -45,17 +48,28 @@ abstract class ThriftServerBaseTest extends FunSuite with BeforeAndAfterAll {
     formatSparkVersion(sparkVersion)
   }
 
-  def jdbcUri(defaultDb: String, sessionConf: String*): String = if (mode == ServerMode.http) {
-    s"jdbc:hive2://localhost:$port/$defaultDb?hive.server2.transport.mode=http;" +
-      s"hive.server2.thrift.http.path=cliservice;${sessionConf.mkString(";")}"
-  } else {
-    s"jdbc:hive2://localhost:$port/$defaultDb?${sessionConf.mkString(";")}"
+  def jdbcUri(defaultDb: String, sessionConf: String*): String = {
+    // Pin the Spark driver to loopback so that sessions launched by the Thrift server bind and
+    // advertise a locally reachable address. Without this, on hosts whose hostname resolves to a
+    // non-bindable LAN IP (e.g. some macOS setups) the Spark driver / block manager fails with
+    // "Can't assign requested address" or the executor times out fetching REPL classes.
+    val driverConf = Seq(
+      s"livy.session.conf.${TestUtils.SPARK_DRIVER_HOST}=${TestUtils.TEST_BIND_HOST}",
+      s"livy.session.conf.${TestUtils.SPARK_DRIVER_BIND_ADDRESS}=${TestUtils.TEST_BIND_HOST}")
+    val allConf = driverConf ++ sessionConf
+    if (mode == ServerMode.http) {
+      s"jdbc:hive2://localhost:$port/$defaultDb?hive.server2.transport.mode=http;" +
+        s"hive.server2.thrift.http.path=cliservice;${allConf.mkString(";")}"
+    } else {
+      s"jdbc:hive2://localhost:$port/$defaultDb?${allConf.mkString(";")}"
+    }
   }
 
   override def beforeAll(): Unit = {
     Class.forName(classOf[HiveDriver].getCanonicalName)
     livyConf.set(LivyConf.THRIFT_TRANSPORT_MODE, mode.toString)
     livyConf.set(LivyConf.THRIFT_SERVER_PORT, port)
+    livyConf.set(RSCConf.Entry.RPC_SERVER_ADDRESS.key(), TestUtils.TEST_BIND_HOST)
 
     // Set formatted Spark and Scala version into livy configuration, this will be used by
     // session creation.

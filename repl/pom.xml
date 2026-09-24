@@ -23,11 +23,11 @@
     <groupId>org.apache.livy</groupId>
     <artifactId>multi-scala-project-root</artifactId>
     <relativePath>../scala/pom.xml</relativePath>
-    <version>0.8.0-incubating-SNAPSHOT</version>
+    <version>1.0.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>livy-repl-parent</artifactId>
-  <version>0.8.0-incubating-SNAPSHOT</version>
+  <version>1.0.0-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <dependencies>
@@ -61,6 +61,13 @@
     </dependency>
 
     <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>livy-test-lib</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-core</artifactId>
       <scope>provided</scope>
@@ -84,8 +91,23 @@
     </dependency>
 
     <dependency>
-      <groupId>log4j</groupId>
-      <artifactId>log4j</artifactId>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-slf4j-impl</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-1.2-api</artifactId>
       <scope>provided</scope>
     </dependency>
 
@@ -100,6 +122,16 @@
       <artifactId>spark-core_${scala.binary.version}</artifactId>
       <version>${spark.version}</version>
       <scope>provided</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>log4j</groupId>
+          <artifactId>log4j</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.slf4j</groupId>
+          <artifactId>slf4j-log4j12</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <dependency>
@@ -180,6 +212,15 @@
                   <include>org.json4s:json4s-ast_${scala.binary.version}</include>
                   <include>org.json4s:json4s-core_${scala.binary.version}</include>
                   <include>org.json4s:json4s-jackson_${scala.binary.version}</include>
+                  <!-- json4s 4.x moved `JsonMethods` into a separate
+                       `json4s-jackson-core` module; without shading it too,
+                       the shaded jar is missing `JsonMethods.class` and
+                       PythonInterpreter fails at runtime with
+                       NoClassDefFoundError. The include is scoped to the
+                       artifactId prefix so builds against older json4s
+                       versions (which don't publish this module) still
+                       succeed. -->
+                  <include>org.json4s:json4s-jackson-core_${scala.binary.version}</include>
                   <include>org.json4s:json4s-scalap_${scala.binary.version}</include>
                   <include>com.esotericsoftware:kryo-shaded</include>
                 </includes>

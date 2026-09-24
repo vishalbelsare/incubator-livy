@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
 import base64
 import cloudpickle
-import sys
 import threading
 import traceback
 from concurrent.futures import Future
@@ -133,7 +133,7 @@ class JobHandle(Future):
                 self._invoke_callbacks()
             else:
                 raise RuntimeError('Future in unexpected state::', self._state)
-            self._job_handle_condition.notifyAll()
+            self._job_handle_condition.notify_all()
 
     def cancel(self):
         """
@@ -217,10 +217,7 @@ class JobHandle(Future):
         raise NotImplementedError("This operation is not supported.")
 
     def set_job_exception(self, exception, error_msg=None):
-        if sys.version >= '3':
-            super(JobHandle, self).set_exception(exception)
-        else:
-            super(JobHandle, self).set_exception_info(exception, error_msg)
+        super(JobHandle, self).set_exception(exception)
 
     class _RepeatedTimer(object):
         def __init__(self, interval, polling_job, executor):

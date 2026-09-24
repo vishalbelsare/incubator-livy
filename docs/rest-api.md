@@ -153,6 +153,11 @@ Creates a new interactive Scala, Python, or R shell in the cluster.
   </tr>
   <tr>
     <td>ttl</td>
+    <td>The timeout for this active session, example: 10m (10 minutes)</td>
+    <td>string</td>
+  </tr>
+  <tr>
+    <td>idleTimeout</td>
     <td>The timeout for this inactive session, example: 10m (10 minutes)</td>
     <td>string</td>
   </tr>
@@ -251,6 +256,27 @@ Gets the log lines from this session.
 
 Returns all the statements in a session.
 
+#### Request Parameters
+
+<table class="table">
+  <tr><th>Name</th><th>Description</th><th>Type</th></tr>
+  <tr>
+    <td>from</td>
+    <td>The start index to fetch sessions</td>
+    <td>int</td>
+  </tr>
+  <tr>
+    <td>size</td>
+    <td>Number of sessions to fetch</td>
+    <td>int</td>
+  </tr>
+  <tr>
+    <td>order</td>
+    <td>Provide value as "desc" to get statements in descending order (By default, the list is in ascending order)</td>
+    <td>string</td>
+  </tr>
+</table>
+
 #### Response Body
 
 <table class="table">
@@ -336,7 +362,7 @@ Returns code completion candidates for the specified code in the session.
   <tr>
     <td>cursor</td>
     <td>cursor position to get proposals</td>
-    <td>string</td>
+    <td>int</td>
   </tr>
 </table>
 
@@ -567,6 +593,152 @@ Gets the log lines from this batch.
   </tr>
 </table>
 
+### GET /metrics/metrics
+
+Returns Codahale (Dropwizard) metrics for the Livy server. The metrics servlet is
+mounted at `/metrics`; the JSON payload is served at `/metrics/metrics`.
+
+Session count gauges (`livy.sessions.*`) are published only when
+`livy.server.session-metrics.enabled` is set to `true` (default: `false`).
+
+Append `?pretty=true` for formatted output.
+
+#### Request Parameters
+
+<table class="table">
+  <tr><th>Name</th><th>Description</th><th>Type</th></tr>
+  <tr>
+    <td>pretty</td>
+    <td>When set to <code>true</code>, returns formatted JSON</td>
+    <td>boolean</td>
+  </tr>
+</table>
+
+#### Response Body
+
+JSON object containing Codahale metrics. Session gauges are exposed under the
+`gauges` key. Each gauge reports the current session count on this Livy server
+instance.
+
+<table class="table">
+  <tr><th>Gauge name</th><th>Description</th></tr>
+  <tr>
+    <td>livy.sessions.total</td>
+    <td>Total interactive and batch sessions</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.active.total</td>
+    <td>Sessions in active states (interactive: starting, idle, busy; batch: starting, running)</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.terminal.total</td>
+    <td>Sessions in terminal states</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.interactive.total</td>
+    <td>Total interactive sessions</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.interactive.idle</td>
+    <td>Interactive sessions in <code>idle</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.interactive.busy</td>
+    <td>Interactive sessions in <code>busy</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.interactive.starting</td>
+    <td>Interactive sessions in <code>starting</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.interactive.shutting_down</td>
+    <td>Interactive sessions in <code>shutting_down</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.interactive.dead</td>
+    <td>Interactive sessions in <code>dead</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.interactive.error</td>
+    <td>Interactive sessions in <code>error</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.interactive.killed</td>
+    <td>Interactive sessions in <code>killed</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.batch.total</td>
+    <td>Total batch sessions</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.batch.starting</td>
+    <td>Batch sessions in <code>starting</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.batch.running</td>
+    <td>Batch sessions in <code>running</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.batch.success</td>
+    <td>Batch sessions in <code>success</code> or <code>succeeded</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.batch.dead</td>
+    <td>Batch sessions in <code>dead</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.batch.error</td>
+    <td>Batch sessions in <code>error</code> state</td>
+  </tr>
+  <tr>
+    <td>livy.sessions.batch.killed</td>
+    <td>Batch sessions in <code>killed</code> state</td>
+  </tr>
+</table>
+
+### POST /recovery/sessions/refresh
+
+Operator endpoint. Re-scans the recovery state store and imports any interactive
+sessions written by another Livy server that this server doesn't yet have in memory.
+Add-only: existing in-memory sessions are never removed by this call.
+
+**Authorization:** restricted to users listed in `livy.superusers`; all other callers
+get a `403`. Also requires `livy.server.recovery.mode` to be set to something other
+than `off` (i.e. a real state store must be configured); otherwise this returns `409`,
+since there would be nothing to refresh from.
+
+#### Response Body
+
+<table class="table">
+  <tr><th>Name</th><th>Description</th><th>Type</th></tr>
+  <tr>
+    <td>added</td>
+    <td>Number of sessions imported from the state store that weren't already in memory</td>
+    <td>int</td>
+  </tr>
+  <tr>
+    <td>total</td>
+    <td>Total number of interactive sessions in memory after the refresh</td>
+    <td>int</td>
+  </tr>
+  <tr>
+    <td>failed</td>
+    <td>Number of state store entries that failed to deserialize</td>
+    <td>int</td>
+  </tr>
+</table>
+
+### POST /recovery/batches/refresh
+
+Same as `POST /recovery/sessions/refresh`, but for batch sessions. Same authorization
+and recovery-mode requirements, and the same response body shape.
+
+### POST /recovery/refresh
+
+Runs both of the above in a single call. Returns a JSON object with `sessions` and
+`batches` keys, each holding a response body of the same shape as the individual
+endpoints above.
+
 ## REST Objects
 
 ### Session
@@ -613,6 +785,71 @@ A session represents an interactive shell.
   <tr>
     <td>appInfo</td>
     <td>The detailed application info</td>
+    <td>Map of key=val</td>
+  </tr>
+  <tr>
+    <td>ttl</td>
+    <td>The timeout for this active session, example: 10m (10 minutes)</td>
+    <td>string</td>
+  </tr>
+  <tr>
+    <td>idleTimeout</td>
+    <td>The timeout for this inactive session, example: 10m (10 minutes)</td>
+    <td>string</td>
+  </tr>
+  <tr>
+    <td>jars</td>
+    <td>jars to be used in this session</td>
+    <td>list of strings</td>
+  </tr>
+  <tr>
+    <td>pyFiles</td>
+    <td>Python files to be used in this session</td>
+    <td>list of strings</td>
+  </tr>
+  <tr>
+    <td>files</td>
+    <td>files to be used in this session</td>
+    <td>list of strings</td>
+  </tr>
+  <tr>
+    <td>driverMemory</td>
+    <td>Amount of memory to use for the driver process</td>
+    <td>string</td>
+  </tr>
+  <tr>
+    <td>driverCores</td>
+    <td>Number of cores to use for the driver process</td>
+    <td>int</td>
+  </tr>
+  <tr>
+    <td>executorMemory</td>
+    <td>Amount of memory to use per executor process</td>
+    <td>string</td>
+  </tr>
+  <tr>
+    <td>executorCores</td>
+    <td>Number of cores to use for each executor</td>
+    <td>int</td>
+  </tr>
+  <tr>
+    <td>numExecutors</td>
+    <td>Number of executors to launch for this session</td>
+    <td>int</td>
+  </tr>
+  <tr>
+    <td>archives</td>
+    <td>Archives to be used in this session</td>
+    <td>List of string</td>
+  </tr>
+  <tr>
+    <td>queue</td>
+    <td>The name of the YARN queue to which submitted</td>
+    <td>string</td>
+  </tr>
+  <tr>
+    <td>conf</td>
+    <td>Spark configuration properties</td>
     <td>Map of key=val</td>
   </tr>
 </table>
@@ -808,12 +1045,12 @@ A statement represents the result of an execution statement.
   <tr><th>Name</th><th>Description</th><th>Type</th></tr>
   <tr>
     <td>id</td>
-    <td>The session id</td>
+    <td>The batch id</td>
     <td>int</td>
   </tr>
   <tr>
     <td>appId</td>
-    <td>The application id of this session</td>
+    <td>The application id of this batch</td>
     <td>string</td>
   </tr>
   <tr>
@@ -830,6 +1067,21 @@ A statement represents the result of an execution statement.
     <td>log</td>
     <td>The log lines</td>
     <td>list of strings</td>
+  </tr>
+  <tr>
+    <td>name</td>
+    <td>The application name of this batch</td>
+    <td>string</td>
+  </tr>
+  <tr>
+    <td>owner</td>
+    <td>Remote user who submitted this batch</td>
+    <td>string</td>
+  </tr>
+  <tr>
+    <td>proxyUser</td>
+    <td>User to impersonate when running</td>
+    <td>string</td>
   </tr>
   <tr>
     <td>state</td>

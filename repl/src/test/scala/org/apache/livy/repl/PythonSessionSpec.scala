@@ -19,7 +19,9 @@ package org.apache.livy.repl
 
 import org.json4s.Extraction
 import org.json4s.jackson.JsonMethods.parse
-import org.scalatest._
+import org.scalatest.{BeforeAndAfterAll, Outcome}
+import org.scalatest.funspec.AnyFunSpec
+import org.scalatest.matchers.should.Matchers
 
 import org.apache.livy.sessions._
 
@@ -169,8 +171,6 @@ abstract class PythonSessionSpec extends BaseSessionSpec(PySpark) {
     result should equal (expectedResult)
   }
 }
-
-class Python2SessionSpec extends PythonSessionSpec
 
 class Python3SessionSpec extends PythonSessionSpec with BeforeAndAfterAll {
 

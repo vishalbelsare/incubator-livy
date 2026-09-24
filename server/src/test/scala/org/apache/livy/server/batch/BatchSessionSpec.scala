@@ -26,7 +26,8 @@ import scala.concurrent.duration.Duration
 import org.mockito.Matchers
 import org.mockito.Matchers.anyObject
 import org.mockito.Mockito._
-import org.scalatest.{BeforeAndAfter, FunSpec}
+import org.scalatest.BeforeAndAfter
+import org.scalatest.funspec.AnyFunSpec
 import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.livy.{LivyBaseUnitTestSuite, LivyConf, Utils}
@@ -36,9 +37,9 @@ import org.apache.livy.sessions.SessionState
 import org.apache.livy.utils.{AppInfo, Clock, SparkApp}
 
 class BatchSessionSpec
-  extends FunSpec
+  extends AnyFunSpec
   with BeforeAndAfter
-  with org.scalatest.Matchers
+  with org.scalatest.matchers.should.Matchers
   with LivyBaseUnitTestSuite {
 
   val script: Path = {
@@ -48,7 +49,7 @@ class BatchSessionSpec
     try {
       writer.write(
         """
-          |print "hello world"
+          |print("hello world")
         """.stripMargin)
     } finally {
       writer.close()
@@ -138,12 +139,67 @@ class BatchSessionSpec
       }) should be (true)
     }
 
+    it("should pass default YARN queue to spark-submit when request queue is empty") {
+      val req = new CreateBatchRequest()
+      req.file = script.toString
+      req.queue = None
+      req.conf = Map("spark.driver.extraClassPath" -> sys.props("java.class.path"))
+
+      val conf = new LivyConf()
+        .set(LivyConf.LOCAL_FS_WHITELIST, sys.props("java.io.tmpdir"))
+        .set(LivyConf.SPARK_YARN_QUEUE, "livy-default-batch-queue")
+
+      val accessManager = new AccessManager(conf)
+      val batch = BatchSession.create(10, None, req, conf, accessManager, null, None, sessionStore)
+      batch.start()
+
+      Utils.waitUntil({ () => !batch.state.isActive }, Duration(10, TimeUnit.SECONDS))
+      batch.logLines().mkString should include("livy-default-batch-queue")
+    }
+
+    it("should prioritize user-specified request queue over LivyConf configuration") {
+      val req = new CreateBatchRequest()
+      req.file = script.toString
+      req.queue = Some("user-custom-batch-queue")
+      req.conf = Map("spark.driver.extraClassPath" -> sys.props("java.class.path"))
+
+      val conf = new LivyConf()
+        .set(LivyConf.LOCAL_FS_WHITELIST, sys.props("java.io.tmpdir"))
+        .set(LivyConf.SPARK_YARN_QUEUE, "livy-default-batch-queue")
+
+      val accessManager = new AccessManager(conf)
+      val batch = BatchSession.create(20, None, req, conf, accessManager, null, None, sessionStore)
+      batch.start()
+
+      Utils.waitUntil({ () => !batch.state.isActive }, Duration(10, TimeUnit.SECONDS))
+      batch.logLines().mkString should include("user-custom-batch-queue")
+      batch.logLines().mkString should not include "livy-default-batch-queue"
+    }
+
+    it("should pass default YARN queue when request queue is empty string") {
+      val req = new CreateBatchRequest()
+      req.file = script.toString
+      req.queue = Some("")
+      req.conf = Map("spark.driver.extraClassPath" -> sys.props("java.class.path"))
+
+      val conf = new LivyConf()
+        .set(LivyConf.LOCAL_FS_WHITELIST, sys.props("java.io.tmpdir"))
+        .set(LivyConf.SPARK_YARN_QUEUE, "livy-default-batch-queue")
+
+      val accessManager = new AccessManager(conf)
+      val batch = BatchSession.create(30, None, req, conf, accessManager, null, None, sessionStore)
+      batch.start()
+
+      Utils.waitUntil({ () => !batch.state.isActive }, Duration(10, TimeUnit.SECONDS))
+      batch.logLines().mkString should include("livy-default-batch-queue")
+    }
+
     def testRecoverSession(name: Option[String]): Unit = {
       val conf = new LivyConf()
       val req = new CreateBatchRequest()
       val name = Some("Test Batch Session")
       val mockApp = mock[SparkApp]
-      val m = BatchRecoveryMetadata(99, name, None, "appTag", null, None)
+      val m = BatchRecoveryMetadata(99, name, None, "appTag", null, None, "")
       val batch = BatchSession.recover(m, conf, sessionStore, Some(mockApp))
 
       batch.state shouldBe (SessionState.Recovering)
@@ -160,5 +216,14 @@ class BatchSessionSpec
           testRecoverSession(name)
         }
       }
+
+    it("should propagate the stored namespace through recovery metadata") {
+      val conf = new LivyConf()
+      val mockApp = mock[SparkApp]
+      val m = BatchRecoveryMetadata(
+        101, Some("ns-session"), None, "appTag", "owner", None, "team-a")
+      val batch = BatchSession.recover(m, conf, sessionStore, Some(mockApp))
+      batch.recoveryMetadata.asInstanceOf[BatchRecoveryMetadata].namespace shouldBe "team-a"
+    }
   }
 }

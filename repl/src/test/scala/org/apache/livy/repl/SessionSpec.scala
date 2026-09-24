@@ -21,21 +21,28 @@ import java.util.Properties
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 
 import org.apache.spark.SparkConf
-import org.scalatest.{BeforeAndAfter, FunSpec}
-import org.scalatest.Matchers._
+import org.scalatest.BeforeAndAfter
 import org.scalatest.concurrent.Eventually
+import org.scalatest.funspec.AnyFunSpec
+import org.scalatest.matchers.should.Matchers._
 import org.scalatest.time._
 
 import org.apache.livy.LivyBaseUnitTestSuite
+import org.apache.livy.client.common.TestUtils
 import org.apache.livy.repl.Interpreter.ExecuteResponse
 import org.apache.livy.rsc.RSCConf
 import org.apache.livy.sessions._
 
-class SessionSpec extends FunSpec with Eventually with LivyBaseUnitTestSuite with BeforeAndAfter {
+class SessionSpec extends AnyFunSpec with Eventually
+  with LivyBaseUnitTestSuite with BeforeAndAfter {
   override implicit val patienceConfig =
     PatienceConfig(timeout = scaled(Span(30, Seconds)), interval = scaled(Span(100, Millis)))
 
   private val rscConf = new RSCConf(new Properties()).set(RSCConf.Entry.SESSION_KIND, "spark")
+
+  private def newSparkConf(): SparkConf = new SparkConf()
+    .set(TestUtils.SPARK_DRIVER_HOST, TestUtils.TEST_BIND_HOST)
+    .set(TestUtils.SPARK_DRIVER_BIND_ADDRESS, TestUtils.TEST_BIND_HOST)
 
   describe("Session") {
     var session: Session = null
@@ -52,7 +59,7 @@ class SessionSpec extends FunSpec with Eventually with LivyBaseUnitTestSuite wit
         Array("not_started", "starting", "idle", "busy", "idle", "busy", "idle")
       val actualStateTransitions = new ConcurrentLinkedQueue[String]()
 
-      session = new Session(rscConf, new SparkConf(), None,
+      session = new Session(rscConf, newSparkConf(), None,
         { s => actualStateTransitions.add(s.toString) })
       session.start()
       session.execute("")
@@ -68,13 +75,13 @@ class SessionSpec extends FunSpec with Eventually with LivyBaseUnitTestSuite wit
       val actualStateTransitions = new ConcurrentLinkedQueue[String]()
 
       val blockFirstExecuteCall = new CountDownLatch(1)
-      val interpreter = new SparkInterpreter(new SparkConf()) {
+      val interpreter = new SparkInterpreter(newSparkConf()) {
         override def execute(code: String): ExecuteResponse = {
           blockFirstExecuteCall.await(10, TimeUnit.SECONDS)
           super.execute(code)
         }
       }
-      session = new Session(rscConf, new SparkConf(), Some(interpreter),
+      session = new Session(rscConf, newSparkConf(), Some(interpreter),
         { s => actualStateTransitions.add(s.toString) })
       session.start()
 
@@ -90,7 +97,7 @@ class SessionSpec extends FunSpec with Eventually with LivyBaseUnitTestSuite wit
 
     it("should remove old statements when reaching threshold") {
       rscConf.set(RSCConf.Entry.RETAINED_STATEMENTS, 2)
-      session = new Session(rscConf, new SparkConf())
+      session = new Session(rscConf, newSparkConf())
       session.start()
 
       session.statements.size should be (0)

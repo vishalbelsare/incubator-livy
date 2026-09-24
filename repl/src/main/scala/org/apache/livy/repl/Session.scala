@@ -137,7 +137,7 @@ class Session(
       entries
     }(interpreterExecutor)
 
-    future.onFailure { case _ => changeState(SessionState.Error()) }(interpreterExecutor)
+    future.failed.foreach { _ => changeState(SessionState.Error()) }(interpreterExecutor)
     future
   }
 
@@ -348,7 +348,7 @@ class Session(
           case "1" =>
             (s"""setJobGroup(sc, "$jobGroup", "Job group for statement $jobGroup", FALSE)""",
              SparkR)
-          case "2" | "3" =>
+          case "2" | "3" | "4" =>
             (s"""setJobGroup("$jobGroup", "Job group for statement $jobGroup", FALSE)""", SparkR)
           case v =>
             throw new IllegalArgumentException(s"Unknown Spark major version [$v]")

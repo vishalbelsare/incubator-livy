@@ -14,10 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from abc import ABCMeta, abstractproperty, abstractmethod
+
+from abc import ABCMeta, abstractmethod
 
 
-class JobContext:
+class JobContext(metaclass=ABCMeta):
     """
     An abstract class that holds runtime information about the job execution
     context.
@@ -28,9 +29,8 @@ class JobContext:
 
     """
 
-    __metaclass__ = ABCMeta
-
-    @abstractproperty
+    @property
+    @abstractmethod
     def sc(self):
         """
         The shared SparkContext instance.
@@ -50,7 +50,8 @@ class JobContext:
         """
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def sql_ctx(self):
         """
         The shared SQLContext instance.
@@ -70,7 +71,8 @@ class JobContext:
         """
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def hive_ctx(self):
         """
         The shared HiveContext instance.
@@ -90,7 +92,8 @@ class JobContext:
         """
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def streaming_ctx(self):
         """
         The shared SparkStreamingContext instance that has already been created
@@ -142,7 +145,8 @@ class JobContext:
         """
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def local_tmp_dir_path(self):
         """"
         Returns
@@ -152,7 +156,8 @@ class JobContext:
         """
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def spark_session(self):
         """
         The shared SparkSession instance.

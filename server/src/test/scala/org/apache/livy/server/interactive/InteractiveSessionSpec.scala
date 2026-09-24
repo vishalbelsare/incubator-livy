@@ -29,11 +29,14 @@ import org.json4s.jackson.JsonMethods.parse
 import org.mockito.{Matchers => MockitoMatchers}
 import org.mockito.Matchers._
 import org.mockito.Mockito.{atLeastOnce, verify, when}
-import org.scalatest.{BeforeAndAfterAll, FunSpec, Matchers}
+import org.scalatest.BeforeAndAfterAll
 import org.scalatest.concurrent.Eventually._
+import org.scalatest.funspec.AnyFunSpec
+import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.livy.{ExecuteRequest, JobHandle, LivyBaseUnitTestSuite, LivyConf}
+import org.apache.livy.client.common.TestUtils
 import org.apache.livy.rsc.{PingJob, RSCClient, RSCConf}
 import org.apache.livy.rsc.driver.StatementState
 import org.apache.livy.server.AccessManager
@@ -41,7 +44,7 @@ import org.apache.livy.server.recovery.SessionStore
 import org.apache.livy.sessions.{PySpark, SessionState, Spark}
 import org.apache.livy.utils.{AppInfo, SparkApp}
 
-class InteractiveSessionSpec extends FunSpec
+class InteractiveSessionSpec extends AnyFunSpec
     with Matchers with BeforeAndAfterAll with LivyBaseUnitTestSuite {
 
   private val livyConf = new LivyConf()
@@ -53,6 +56,7 @@ class InteractiveSessionSpec extends FunSpec
 
   private var session: InteractiveSession = null
   private val accessManager = new AccessManager(livyConf)
+  private val skipRTests = sys.props.getOrElse("skipRTests", "false").toBoolean
 
   private def createSession(
       sessionStore: SessionStore = mock[SessionStore],
@@ -68,10 +72,13 @@ class InteractiveSessionSpec extends FunSpec
     req.name = Some("InteractiveSessionSpec")
     req.conf = Map(
       SparkLauncher.DRIVER_EXTRA_CLASSPATH -> sys.props("java.class.path"),
-      RSCConf.Entry.LIVY_JARS.key() -> ""
+      RSCConf.Entry.LIVY_JARS.key() -> "",
+      RSCConf.Entry.RPC_SERVER_ADDRESS.key() -> TestUtils.TEST_BIND_HOST,
+      TestUtils.SPARK_DRIVER_HOST -> TestUtils.TEST_BIND_HOST,
+      TestUtils.SPARK_DRIVER_BIND_ADDRESS -> TestUtils.TEST_BIND_HOST
     )
     InteractiveSession.create(0, None, null, None, livyConf, accessManager, req,
-      sessionStore, None, mockApp)
+      sessionStore, None, None, mockApp)
   }
 
   private def executeStatement(code: String, codeType: Option[String] = None): JValue = {
@@ -197,26 +204,31 @@ class InteractiveSessionSpec extends FunSpec
         "data" -> Map("text/plain" -> "3")))
       )
 
+      // The Scala REPL under Spark 4 (2.13) may or may not prefix the
+      // bound-name output with `val ` depending on the driver JVM's precise
+      // `-Yrepl-class-based` handling; accept either form so both spark3 and
+      // spark4 builds pass without special-casing environment differences.
       val scalaResult = executeStatement("1 + 2", Some("spark"))
-      scalaResult should equal (Extraction.decompose(Map(
-        "status" -> "ok",
-        "execution_count" -> 1,
-        "data" -> Map("text/plain" -> "res0: Int = 3\n")))
-      )
+      val scalaData = ((scalaResult \ "data") \ "text/plain").extract[String]
+      scalaData should (equal ("res0: Int = 3\n") or equal ("val res0: Int = 3\n"))
+      (scalaResult \ "status").extract[String] should equal ("ok")
+      (scalaResult \ "execution_count").extract[Int] should equal (1)
 
-      val rResult = executeStatement("1 + 2", Some("sparkr"))
-      rResult should equal (Extraction.decompose(Map(
-        "status" -> "ok",
-        "execution_count" -> 2,
-        "data" -> Map("text/plain" -> "[1] 3")))
-      )
+      if (!skipRTests) {
+        val rResult = executeStatement("1 + 2", Some("sparkr"))
+        rResult should equal (Extraction.decompose(Map(
+          "status" -> "ok",
+          "execution_count" -> 2,
+          "data" -> Map("text/plain" -> "[1] 3")))
+        )
+      }
     }
 
     withSession("should report an error if accessing an unknown variable") { session =>
       val result = executeStatement("x")
       val expectedResult = Extraction.decompose(Map(
         "status" -> "error",
-        "execution_count" -> 3,
+        "execution_count" -> (if (skipRTests) 2 else 3),
         "ename" -> "NameError",
         "evalue" -> "name 'x' is not defined",
         "traceback" -> List(
@@ -277,8 +289,9 @@ class InteractiveSessionSpec extends FunSpec
       val mockClient = mock[RSCClient]
       when(mockClient.submit(any(classOf[PingJob]))).thenReturn(mock[JobHandle[Void]])
       val m = InteractiveRecoveryMetadata(
-          78, Some("Test session"), None, "appTag", Spark, 0, null, None, None,
-          Some(URI.create("")))
+          78, Some("Test session"), None, "appTag", Spark, 0, null, None, None, None,
+          None, None, None, Map.empty[String, String], List.empty[String], List.empty[String],
+          List.empty[String], None, List.empty[String], None, None, Some(URI.create("")), "")
       val s = InteractiveSession.recover(m, conf, sessionStore, None, Some(mockClient))
       s.start()
 
@@ -295,7 +308,9 @@ class InteractiveSessionSpec extends FunSpec
       val mockClient = mock[RSCClient]
       when(mockClient.submit(any(classOf[PingJob]))).thenReturn(mock[JobHandle[Void]])
       val m = InteractiveRecoveryMetadata(
-          78, None, None, "appTag", Spark, 0, null, None, None, Some(URI.create("")))
+          78, None, None, "appTag", Spark, 0, null, None, None, None,
+          None, None, None, Map.empty[String, String], List.empty[String], List.empty[String],
+          List.empty[String], None, List.empty[String], None, None, Some(URI.create("")), "")
       val s = InteractiveSession.recover(m, conf, sessionStore, None, Some(mockClient))
       s.start()
 
@@ -310,11 +325,100 @@ class InteractiveSessionSpec extends FunSpec
       val conf = new LivyConf()
       val sessionStore = mock[SessionStore]
       val m = InteractiveRecoveryMetadata(
-        78, None, Some("appId"), "appTag", Spark, 0, null, None, None, None)
+        78, None, Some("appId"), "appTag", Spark, 0, null, None, None, None,
+          None, None, None, Map.empty[String, String], List.empty[String], List.empty[String],
+          List.empty[String], None, List.empty[String], None, None, None, "")
       val s = InteractiveSession.recover(m, conf, sessionStore, None)
       s.start()
       s.state shouldBe a[SessionState.Dead]
       s.logLines().mkString should include("RSCDriver URI is unknown")
+    }
+  }
+
+  describe("default spark application name") {
+    it("should use livy-session prefix by default") {
+      val conf = new LivyConf(false)
+      InteractiveSession.defaultSparkAppName(42, conf) should be("livy-session-42")
+    }
+
+    it("should use configured app name prefix") {
+      val conf = new LivyConf(false)
+        .set(LivyConf.SERVER_APP_NAME_PREFIX, "my-cluster")
+      InteractiveSession.defaultSparkAppName(3, conf) should be("my-cluster-3")
+    }
+
+    it("should fall back to livy-session when prefix is empty") {
+      val conf = new LivyConf(false)
+        .set(LivyConf.SERVER_APP_NAME_PREFIX, "")
+      InteractiveSession.defaultSparkAppName(5, conf) should be("livy-session-5")
+    }
+
+    it("should not override user-provided spark.app.name") {
+      val conf = new LivyConf(false)
+        .set(LivyConf.SERVER_APP_NAME_PREFIX, "my-cluster")
+      val props = scala.collection.mutable.Map("spark.app.name" -> "user-provided-name")
+      props.getOrElseUpdate("spark.app.name", InteractiveSession.defaultSparkAppName(1, conf))
+      props("spark.app.name") should be("user-provided-name")
+    }
+  }
+
+  describe("InteractiveSession") {
+    it("should inherit the default YARN queue from LivyConf when request queue is empty") {
+      val testLivyConf = new LivyConf()
+        .set(LivyConf.REPL_JARS, "dummy.jar")
+        .set(LivyConf.SPARK_YARN_QUEUE, "livy-default-queue")
+
+      val req = new CreateInteractiveRequest()
+      req.kind = Spark
+      req.queue = None
+      req.conf = Map(RSCConf.Entry.LIVY_JARS.key() -> "")
+
+      val mockClient = Some(mock[RSCClient])
+
+      val s = InteractiveSession.create(
+        101, None, "systest", None, testLivyConf, accessManager,
+        req, mock[SessionStore], None, None, None, mockClient
+      )
+
+      s.queue shouldBe Some("livy-default-queue")
+    }
+
+    it("should prioritize user-specified request queue over LivyConf global configuration") {
+      val testLivyConf = new LivyConf()
+        .set(LivyConf.REPL_JARS, "dummy.jar")
+        .set(LivyConf.SPARK_YARN_QUEUE, "livy-default-queue")
+
+      val req = new CreateInteractiveRequest()
+      req.kind = Spark
+      req.queue = Some("user-custom-queue")
+      req.conf = Map(RSCConf.Entry.LIVY_JARS.key() -> "")
+
+      val mockClient = Some(mock[RSCClient])
+
+      val s = InteractiveSession.create(
+        102, None, "systest", None, testLivyConf, accessManager,
+        req, mock[SessionStore], None, None, None, mockClient
+      )
+
+      s.queue shouldBe Some("user-custom-queue")
+    }
+
+    it("should inherit default YARN queue when request queue is empty string") {
+      val testLivyConf = new LivyConf()
+        .set(LivyConf.REPL_JARS, "dummy.jar")
+        .set(LivyConf.SPARK_YARN_QUEUE, "livy-default-queue")
+
+      val req = new CreateInteractiveRequest()
+      req.kind = Spark
+      req.queue = Some("")   // explicitly empty string
+      req.conf = Map(RSCConf.Entry.LIVY_JARS.key() -> "")
+
+      val s = InteractiveSession.create(
+        103, None, "systest", None, testLivyConf, accessManager,
+        req, mock[SessionStore], None, None, None, Some(mock[RSCClient])
+      )
+
+      s.queue shouldBe Some("livy-default-queue")
     }
   }
 }

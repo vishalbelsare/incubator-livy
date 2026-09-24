@@ -36,6 +36,7 @@ import org.scalatest.concurrent.Eventually._
 
 import org.apache.livy.{LivyConf, Logging}
 import org.apache.livy.client.common.TestUtils
+import org.apache.livy.rsc.RSCConf
 import org.apache.livy.server.LivyServer
 
 private class MiniClusterConfig(val config: Map[String, String]) {
@@ -98,6 +99,7 @@ object MiniYarnMain extends MiniClusterBase {
 
   override protected def start(config: MiniClusterConfig, configPath: String): Unit = {
     val baseConfig = new YarnConfiguration()
+    baseConfig.setFloat(YarnConfiguration.NM_MAX_PER_DISK_UTILIZATION_PERCENTAGE, 100.0f)
     val yarnCluster = new MiniYARNCluster(getClass().getName(), config.nmCount,
       config.localDirCount, config.logDirCount)
     yarnCluster.init(baseConfig)
@@ -135,7 +137,10 @@ object MiniLivyMain extends MiniClusterBase {
       LivyConf.YARN_POLL_INTERVAL.key -> "500ms",
       LivyConf.RECOVERY_MODE.key -> "recovery",
       LivyConf.RECOVERY_STATE_STORE.key -> "filesystem",
-      LivyConf.RECOVERY_STATE_STORE_URL.key -> s"file://$configPath/state-store")
+      LivyConf.RECOVERY_STATE_STORE_URL.key -> s"file://$configPath/state-store",
+      LivyConf.SERVER_HOST.key -> TestUtils.TEST_BIND_HOST,
+      LivyConf.THRIFT_BIND_HOST.key -> TestUtils.TEST_BIND_HOST,
+      RSCConf.Entry.RPC_SERVER_ADDRESS.key() -> TestUtils.TEST_BIND_HOST)
     val thriftEnabled = sys.env.get("LIVY_TEST_THRIFT_ENABLED")
     if (thriftEnabled.nonEmpty && thriftEnabled.forall(_.toBoolean)) {
       baseConf + (LivyConf.THRIFT_SERVER_ENABLED.key -> "true")
@@ -220,6 +225,11 @@ class MiniCluster(config: Map[String, String]) extends Cluster with MiniClusterU
     filtered.mkString(File.pathSeparator)
   }
 
+  private def extraJavaTestArgs: Seq[String] = {
+    Option(System.getProperty("extraJavaTestArgs"))
+      .map(_.split("\\s+").toSeq).getOrElse(Nil)
+  }
+
   override def deploy(): Unit = {
     if (_tempDir.exists()) {
       FileUtils.deleteQuietly(_tempDir)
@@ -231,6 +241,16 @@ class MiniCluster(config: Map[String, String]) extends Cluster with MiniClusterU
       "spark.executor.instances" -> "1",
       "spark.scheduler.minRegisteredResourcesRatio" -> "0.0",
       "spark.ui.enabled" -> "false",
+      TestUtils.SPARK_DRIVER_HOST -> TestUtils.TEST_BIND_HOST,
+      "spark.yarn.appMasterEnv.SPARK_LOCAL_IP" -> TestUtils.TEST_BIND_HOST,
+      "spark.executorEnv.SPARK_LOCAL_IP" -> TestUtils.TEST_BIND_HOST,
+      // Propagate the host shell PATH into the YARN AM and executor
+      // containers so that native binaries the tests spawn (Rscript for
+      // SparkR, python for PySpark) resolve. YARN's default sanitised PATH
+      // otherwise omits /opt/homebrew/bin on macOS which causes RRunner and
+      // PythonRunner to fail with `error=2, No such file or directory`.
+      "spark.yarn.appMasterEnv.PATH" -> sys.env.getOrElse("PATH", ""),
+      "spark.executorEnv.PATH" -> sys.env.getOrElse("PATH", ""),
       SparkLauncher.DRIVER_MEMORY -> "512m",
       SparkLauncher.EXECUTOR_MEMORY -> "512m",
       SparkLauncher.DRIVER_EXTRA_JAVA_OPTIONS -> "-Dtest.appender=console",
@@ -240,8 +260,10 @@ class MiniCluster(config: Map[String, String]) extends Cluster with MiniClusterU
 
     _configDir = mkdir("hadoop-conf")
     saveProperties(config, new File(configDir, "cluster.conf"))
-    hdfs = Some(start(MiniHdfsMain.getClass, new File(configDir, "core-site.xml")))
-    yarn = Some(start(MiniYarnMain.getClass, new File(configDir, "yarn-site.xml")))
+    hdfs = Some(start(MiniHdfsMain.getClass, new File(configDir, "core-site.xml"),
+      extraJavaTestArgs))
+    yarn = Some(start(MiniYarnMain.getClass, new File(configDir, "yarn-site.xml"),
+      extraJavaTestArgs))
     runLivy()
 
     _hdfsScrathDir = fs.makeQualified(new Path("/"))
@@ -261,7 +283,7 @@ class MiniCluster(config: Map[String, String]) extends Cluster with MiniClusterU
       .map { args =>
         Seq(args, s"-Djacoco.args=$args")
       }.getOrElse(Nil)
-    val localLivy = start(MiniLivyMain.getClass, confFile, extraJavaArgs = jacocoArgs)
+    val localLivy = start(MiniLivyMain.getClass, confFile, jacocoArgs ++ extraJavaTestArgs)
 
     val props = loadProperties(confFile)
     _livyEndpoint = config.getOrElse("livyEndpoint", props("livy.server.server-url"))
@@ -335,7 +357,7 @@ class MiniCluster(config: Map[String, String]) extends Cluster with MiniClusterU
     pb.environment().put("LIVY_CONF_DIR", configDir.getAbsolutePath())
     pb.environment().put("HADOOP_CONF_DIR", configDir.getAbsolutePath())
     pb.environment().put("SPARK_CONF_DIR", _sparkConfigDir.getAbsolutePath())
-    pb.environment().put("SPARK_LOCAL_IP", "127.0.0.1")
+    pb.environment().put("SPARK_LOCAL_IP", TestUtils.TEST_BIND_HOST)
 
     val child = pb.start()
 

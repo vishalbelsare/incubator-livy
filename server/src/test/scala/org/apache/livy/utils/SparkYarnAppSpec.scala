@@ -16,7 +16,6 @@
  */
 package org.apache.livy.utils
 
-import java.util.ArrayList
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
@@ -24,29 +23,53 @@ import scala.collection.JavaConverters._
 import scala.concurrent.duration._
 import scala.language.postfixOps
 
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsRequest
 import org.apache.hadoop.yarn.api.records._
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus.UNDEFINED
 import org.apache.hadoop.yarn.api.records.YarnApplicationState._
 import org.apache.hadoop.yarn.client.api.YarnClient
 import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException
 import org.apache.hadoop.yarn.util.ConverterUtils
+import org.mockito.ArgumentCaptor
+import org.mockito.Matchers.any
 import org.mockito.Mockito._
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 import org.scalatest.concurrent.Eventually
-import org.scalatest.FunSpec
+import org.scalatest.funspec.AnyFunSpec
 import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.livy.{LivyBaseUnitTestSuite, LivyConf, Utils}
 import org.apache.livy.utils.SparkApp._
 
-class SparkYarnAppSpec extends FunSpec with LivyBaseUnitTestSuite {
+class SparkYarnAppSpec extends AnyFunSpec with LivyBaseUnitTestSuite {
   private def cleanupThread(t: Thread)(f: => Unit) = {
     try { f } finally { t.interrupt() }
   }
 
   private def mockSleep(ms: Long) = {
     Thread.`yield`()
+  }
+
+  private def mockGetApplicationsByTags(
+      client: YarnClient,
+      reports: List[ApplicationReport]): Unit = {
+    when(client.getApplications(any(classOf[GetApplicationsRequest])))
+      .thenReturn(reports.asJava)
+  }
+
+  private def verifyFilteredGetApplicationsRequest(
+      client: YarnClient,
+      expectedTags: Set[String]): Unit = {
+    val requestCaptor = ArgumentCaptor.forClass(classOf[GetApplicationsRequest])
+    verify(client, atLeastOnce()).getApplications(requestCaptor.capture())
+    val capturedRequest = requestCaptor.getValue
+    expectedTags.foreach { tag =>
+      assert(capturedRequest.getApplicationTags.contains(tag.toLowerCase),
+        s"Request must contain the lowercase tag '$tag'")
+    }
+    assert(capturedRequest.getApplicationTypes.contains("SPARK"),
+      "Request must filter by application type 'SPARK'")
   }
 
   describe("SparkYarnApp") {
@@ -284,7 +307,7 @@ class SparkYarnAppSpec extends FunSpec with LivyBaseUnitTestSuite {
 
         val mockSparkSubmit = mock[LineBufferedProcess]
         when(mockSparkSubmit.isAlive).thenReturn(false)
-        when(mockSparkSubmit.exitValue).thenReturn(-1)
+        when(mockSparkSubmit.exitValue()).thenReturn(-1)
 
         val listener = new SparkAppListener {
           var nStateChanged = 0
@@ -389,8 +412,7 @@ class SparkYarnAppSpec extends FunSpec with LivyBaseUnitTestSuite {
         when(mockAppReport.getFinalApplicationStatus).thenReturn(FinalApplicationStatus.SUCCEEDED)
         when(mockAppReport.getYarnApplicationState).thenReturn(YarnApplicationState.FINISHED)
         when(mockYarnClient.getApplicationReport(appId)).thenReturn(mockAppReport)
-        when(mockYarnClient.getApplications(Set("SPARK").asJava))
-          .thenReturn(List(mockAppReport).asJava)
+        mockGetApplicationsByTags(mockYarnClient, List(mockAppReport))
 
         val mockListener = mock[SparkAppListener]
         val mockSparkSubmit = mock[LineBufferedProcess]
@@ -404,6 +426,7 @@ class SparkYarnAppSpec extends FunSpec with LivyBaseUnitTestSuite {
 
           verify(mockYarnClient, atLeast(1)).getApplicationReport(appId)
           verify(mockListener).appIdKnown(appId.toString)
+          verifyFilteredGetApplicationsRequest(mockYarnClient, Set(appTag))
         }
       }
     }
@@ -467,6 +490,124 @@ class SparkYarnAppSpec extends FunSpec with LivyBaseUnitTestSuite {
           verify(mockContainerReport, atLeast(1)).getLogUrl()
           verify(mockListener).appIdKnown(appId.toString)
           verify(mockListener).infoChanged(AppInfo(Some(driverLogUrl), Some(sparkUiUrl)))
+        }
+      }
+    }
+
+    it("should expose driver log url and Spark UI url in KILLED state") {
+      Clock.withSleepMethod(mockSleep) {
+        val mockYarnClient = mock[YarnClient]
+        val driverLogUrl = "DRIVER LOG URL"
+        val sparkUiUrl = "SPARK UI URL"
+
+        val mockApplicationAttemptId = mock[ApplicationAttemptId]
+        val mockAppReport = mock[ApplicationReport]
+        when(mockAppReport.getApplicationId).thenReturn(appId)
+        when(mockAppReport.getFinalApplicationStatus).thenReturn(FinalApplicationStatus.SUCCEEDED)
+        when(mockAppReport.getTrackingUrl).thenReturn(sparkUiUrl)
+        when(mockAppReport.getCurrentApplicationAttemptId).thenReturn(mockApplicationAttemptId)
+        var done = false
+        when(mockAppReport.getYarnApplicationState).thenAnswer(new Answer[YarnApplicationState]() {
+          override def answer(invocation: InvocationOnMock): YarnApplicationState = {
+            KILLED
+          }
+        })
+        when(mockYarnClient.getApplicationReport(appId)).thenReturn(mockAppReport)
+
+        val mockAttemptReport = mock[ApplicationAttemptReport]
+        val mockContainerId = mock[ContainerId]
+        when(mockAttemptReport.getAMContainerId).thenReturn(mockContainerId)
+        when(mockYarnClient.getApplicationAttemptReport(mockApplicationAttemptId))
+          .thenReturn(mockAttemptReport)
+
+        val mockContainerReport = mock[ContainerReport]
+        when(mockYarnClient.getContainerReport(mockContainerId)).thenReturn(mockContainerReport)
+
+        // Block test until getLogUrl is called 10 times.
+        val getLogUrlCountDown = new CountDownLatch(10)
+        when(mockContainerReport.getLogUrl).thenAnswer(new Answer[String] {
+          override def answer(invocation: InvocationOnMock): String = {
+            getLogUrlCountDown.countDown()
+            driverLogUrl
+          }
+        })
+
+        val mockListener = mock[SparkAppListener]
+
+        val app = new SparkYarnApp(
+          appTag, appIdOption, None, Some(mockListener), livyConf, mockYarnClient)
+        cleanupThread(app.yarnAppMonitorThread) {
+          getLogUrlCountDown.await(TEST_TIMEOUT.length, TEST_TIMEOUT.unit)
+          done = true
+
+          app.yarnAppMonitorThread.join(TEST_TIMEOUT.toMillis)
+          assert(!app.yarnAppMonitorThread.isAlive,
+            "YarnAppMonitorThread should terminate after YARN app is finished.")
+
+          verify(mockYarnClient, atLeast(1)).getApplicationReport(appId)
+          verify(mockAppReport, atLeast(1)).getTrackingUrl()
+          verify(mockContainerReport, atLeast(1)).getLogUrl()
+          verify(mockListener).appIdKnown(appId.toString)
+          verify(mockListener).infoChanged(AppInfo(Some(driverLogUrl), Some(sparkUiUrl)))
+        }
+      }
+    }
+
+    it("should not expose driver log url and Spark UI url in FINISHED state") {
+      Clock.withSleepMethod(mockSleep) {
+        val mockYarnClient = mock[YarnClient]
+        val driverLogUrl = "DRIVER LOG URL"
+        val sparkUiUrl = "SPARK UI URL"
+
+        val mockApplicationAttemptId = mock[ApplicationAttemptId]
+        val mockAppReport = mock[ApplicationReport]
+        when(mockAppReport.getApplicationId).thenReturn(appId)
+        when(mockAppReport.getFinalApplicationStatus).thenReturn(FinalApplicationStatus.SUCCEEDED)
+        when(mockAppReport.getTrackingUrl).thenReturn(sparkUiUrl)
+        when(mockAppReport.getCurrentApplicationAttemptId).thenReturn(mockApplicationAttemptId)
+        var done = false
+        when(mockAppReport.getYarnApplicationState).thenAnswer(new Answer[YarnApplicationState]() {
+          override def answer(invocation: InvocationOnMock): YarnApplicationState = {
+            FINISHED
+          }
+        })
+        when(mockYarnClient.getApplicationReport(appId)).thenReturn(mockAppReport)
+
+        val mockAttemptReport = mock[ApplicationAttemptReport]
+        val mockContainerId = mock[ContainerId]
+        when(mockAttemptReport.getAMContainerId).thenReturn(mockContainerId)
+        when(mockYarnClient.getApplicationAttemptReport(mockApplicationAttemptId))
+          .thenReturn(mockAttemptReport)
+
+        val mockContainerReport = mock[ContainerReport]
+        when(mockYarnClient.getContainerReport(mockContainerId)).thenReturn(mockContainerReport)
+
+        // Block test until getLogUrl is called 10 times.
+        val getLogUrlCountDown = new CountDownLatch(10)
+        when(mockContainerReport.getLogUrl).thenAnswer(new Answer[String] {
+          override def answer(invocation: InvocationOnMock): String = {
+            getLogUrlCountDown.countDown()
+            driverLogUrl
+          }
+        })
+
+        val mockListener = mock[SparkAppListener]
+
+        val app = new SparkYarnApp(
+          appTag, appIdOption, None, Some(mockListener), livyConf, mockYarnClient)
+        cleanupThread(app.yarnAppMonitorThread) {
+          getLogUrlCountDown.await(TEST_TIMEOUT.length, TEST_TIMEOUT.unit)
+          done = true
+
+          app.yarnAppMonitorThread.join(TEST_TIMEOUT.toMillis)
+          assert(!app.yarnAppMonitorThread.isAlive,
+            "YarnAppMonitorThread should terminate after YARN app is finished.")
+
+          verify(mockYarnClient, atLeast(1)).getApplicationReport(appId)
+          verify(mockAppReport, atLeast(1)).getTrackingUrl()
+          verify(mockContainerReport, never()).getLogUrl()
+          verify(mockListener).appIdKnown(appId.toString)
+          verify(mockListener, never()).infoChanged(AppInfo(Some(driverLogUrl), Some(sparkUiUrl)))
         }
       }
     }
@@ -555,16 +696,42 @@ class SparkYarnAppSpec extends FunSpec with LivyBaseUnitTestSuite {
         livyConf.set(LivyConf.YARN_APP_LEAKAGE_CHECK_TIMEOUT, "1000ms")
 
         val client = mock[YarnClient]
-        when(client.getApplications(SparkYarnApp.appType)).
-          thenReturn(new ArrayList[ApplicationReport]())
+        mockGetApplicationsByTags(client, List.empty)
 
         SparkYarnApp.init(livyConf, Some(client))
 
         SparkYarnApp.leakedAppTags.clear()
-        SparkYarnApp.leakedAppTags.put("leakApp", System.currentTimeMillis())
+        val leakAppTag = "leakApp"
+        SparkYarnApp.leakedAppTags.put(leakAppTag, System.currentTimeMillis())
 
         Eventually.eventually(Eventually.timeout(TEST_TIMEOUT), Eventually.interval(100 millis)) {
           assert(SparkYarnApp.leakedAppTags.size() == 0)
+        }
+        verifyFilteredGetApplicationsRequest(client, Set(leakAppTag))
+      }
+    }
+
+    it("should mark app as failed when throwing exception") {
+      Clock.withSleepMethod(mockSleep) {
+        val mockYarnClient = mock[YarnClient]
+        val mockSparkSubmit = mock[LineBufferedProcess]
+        when(mockSparkSubmit.isAlive).thenReturn(false)
+        when(mockSparkSubmit.exitValue).thenReturn(-1)
+        val mockListener = mock[SparkAppListener]
+
+        val app = new SparkYarnApp(
+          appTag, None, Some(mockSparkSubmit), Some(mockListener), livyConf, mockYarnClient)
+        Utils.waitUntil({ () => app.isRunning }, Duration(10, TimeUnit.SECONDS))
+
+        cleanupThread(app.yarnAppMonitorThread) {
+          app.kill()
+          app.yarnAppMonitorThread.join(TEST_TIMEOUT.toMillis)
+
+          assert(!app.yarnAppMonitorThread.isAlive,
+            "YarnAppMonitorThread should terminate after spark-submit failure.")
+
+          assert(app.state == SparkApp.State.FAILED,
+            "SparkYarnApp should end with state failed when spark submit failed")
         }
       }
     }

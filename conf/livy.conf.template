@@ -23,6 +23,9 @@
 # Specify the key password.
 # livy.key-password =
 
+# Name of the keystore implementation that was used when generating the keystore
+# livy.keystore.type = JKS
+
 # Hadoop Credential Provider Path to get "livy.keystore.password" and "livy.key-password".
 # Credential Provider can be created using command as follow:
 # hadoop credential create "livy.keystore.password" -value "secret" -provider jceks://hdfs/path/to/livy.jceks
@@ -34,6 +37,10 @@
 # What port to start the server on.
 # livy.server.port = 8998
 
+# Prefix for YARN application names of interactive sessions when no name is provided
+# in the session creation request. The application name becomes <prefix>-<session-id>.
+# livy.server.app-name-prefix = livy-session
+
 # What base path ui should work on. By default UI is mounted on "/".
 # E.g.: livy.ui.basePath = /my_livy - result in mounting UI on /my_livy/
 # livy.ui.basePath = ""
@@ -44,9 +51,16 @@
 # What spark deploy mode Livy sessions should use.
 # livy.spark.deploy-mode =
 
+# What default YARN queue Livy sessions should use if not specified in the client request.
+# By default, it is null and falls back to the global Hadoop cluster default queue.
+# livy.spark.yarn.queue = default
+
 # Configure Livy server http request and response header size.
 # livy.server.request-header.size = 131072
 # livy.server.response-header.size = 131072
+
+# Whether or not to send server version in http response.
+# livy.server.send-server-version = false
 
 # Enabled to check whether timeout Livy sessions should be stopped.
 # livy.server.session.timeout-check = true
@@ -61,6 +75,13 @@
 # How long a finished session state should be kept in LivyServer for query.
 # livy.server.session.state-retain.sec = 600s
 
+# Enabled to check whether TTL Livy sessions should be stopped.
+# livy.server.session.ttl-check = false
+
+# Time in milliseconds on how long Livy will wait before TTL is an inactive session.
+# Note that the inactive session could be busy running jobs.
+# livy.server.session.ttl = 8h
+
 # If livy should impersonate the requesting users when creating a new session.
 # livy.impersonation.enabled = false
 
@@ -71,6 +92,11 @@
 # directory every time a session is started. By caching these files in HDFS, for example, startup
 # time of sessions on YARN can be reduced.
 # livy.rsc.jars =
+
+# If true, the RSC driver's address is resolved from the hostname reported by the driver
+# instead of the socket's IP. Useful for Kubernetes + service-mesh (Istio) deployments where
+# pod IPs are not stable/routable but hostnames are.
+# livy.rsc.driver.address.use-hostname = false
 
 # Comma-separated list of Livy REPL jars. By default Livy will upload jars from its installation
 # directory every time a session is started. By caching these files in HDFS, for example, startup
@@ -95,6 +121,20 @@
 # Whether to enable csrf protection, by default it is false. If it is enabled, client should add
 # http-header "X-Requested-By" in request if the http method is POST/DELETE/PUT/PATCH.
 # livy.server.csrf-protection.enabled =
+
+# Whether to add security related HTTP headers to responses, by default true. If enabled,
+# Livy server adds HTTP headers to responses based on below configuration parameters starting with
+# `Livy.server.http.header.`
+# livy.server.security-headers.enabled = true
+
+# Security headers added to responses by default when
+# configuration `livy.server.security-headers.enabled` is set to true.
+# STS header is only added if TLS is enabled.
+# livy.server.http.header.X-XSS-Protection = 1; mode=block
+# livy.server.http.header.X-Frame-Options = SAMEORIGIN
+# livy.server.http.header.X-Content-Type-Options = nosniff
+# livy.server.http.header.Strict-Transport-Security = max-age=31536000; includeSubDomains
+# livy.server.http.header.Content-Security-Policy = default-src 'self'; script-src 'self' 'unsafe-inline'; img-src 'self'; frame-src 'self';
 
 # Whether to enable HiveContext in livy interpreter, if it is true hive-site.xml will be detected
 # on user request and then livy server classpath automatically.
@@ -139,6 +179,21 @@
 # The dir in zk to store the data about session.
 # livy.server.recovery.zk-state-store.key-prefix = livy
 
+# Enable SASL authentication for ZooKeeper connections.
+# livy.server.zk.sasl.enabled = false
+
+# JAAS login context name for ZooKeeper SASL authentication.
+# livy.server.zk.sasl.login-context = Client
+
+# The SSL configuration for zookeeper. When livy.server.zk.client.secure=true, the following
+# are required: livy.keystore, livy.server.zk.ssl.keyStore.password,
+# livy.server.zk.ssl.truststore.location, livy.server.zk.ssl.truststore.password.
+# livy.server.zk.client.secure=false
+# livy.server.zk.clientCnxnSocket=org.apache.zookeeper.ClientCnxnSocketNetty
+# livy.server.zk.ssl.keyStore.password=
+# livy.server.zk.ssl.truststore.location=
+# livy.server.zk.ssl.truststore.password=
+
 # If Livy can't find the yarn app within this time, consider it lost.
 # livy.server.yarn.app-lookup-timeout = 120s
 # When the cluster is busy, we may fail to launch yarn app in app-lookup-timeout, then it would
@@ -156,6 +211,10 @@
 
 # If the Livy Web UI should be included in the Livy Server. Enabled by default.
 # livy.ui.enabled = true
+
+# Whether to register session count gauges (livy.sessions.*) at /metrics/metrics.
+# Disabled by default; set to true to publish session gauges for monitoring.
+# livy.server.session-metrics.enabled = false
 
 # Whether to enable Livy server access control, if it is true then all the income requests will
 # be checked if the requested user has permission.
@@ -180,8 +239,92 @@
 # livy.server.auth.kerberos.keytab = <spnego keytab>
 # livy.server.auth.kerberos.name-rules = DEFAULT
 #
+# Principal and keytab for Livy server.
+# livy.server.launch.kerberos.principal = <livy principal>
+# livy.server.launch.kerberos.keytab = <livy keytab>
+# livy.server.launch.kerberos.refresh-interval = 1h
+# livy.server.launch.kerberos.kinit-fail-threshold = 5
+#
 # If user wants to use custom authentication filter, configurations are:
 # livy.server.auth.type = <custom>
 # livy.server.auth.<custom>.class = <class of custom auth filter>
 # livy.server.auth.<custom>.param.<foo1> = <bar1>
 # livy.server.auth.<custom>.param.<foo2> = <bar2>
+
+# Enable to allow custom classpath by proxy user in cluster mode
+# The below configuration parameter is disabled by default.
+# livy.server.session.allow-custom-classpath = true
+
+# value specifies interval to check safe mode in hdfs filesystem
+# livy.server.hdfs.safe-mode.interval = 5
+# value specifies max attempts to retry when safe mode is ON in hdfs filesystem
+# livy.server.hdfs.safe-mode.max.retry.attempts = 10
+
+# Manual authentication to KubeApiserver (by default configured with Kubernetes ServiceAccount
+# if deployed to Kubernetes cluster as a Pod)
+# Kubernetes oauth token file path
+# livy.server.kubernetes.oauthTokenFile =
+# Kubernetes oauth token string value
+# livy.server.kubernetes.oauthTokenValue =
+# Kubernetes CA cert file path
+# livy.server.kubernetes.caCertFile =
+# Kubernetes client key file path
+# livy.server.kubernetes.clientKeyFile =
+# Kubernetes client cert file path
+# livy.server.kubernetes.clientCertFile =
+
+# If Livy can't find the Kubernetes app within this time, consider it lost.
+# livy.server.kubernetes.app-lookup-timeout = 600s
+# If Livy can't find the Kubernetes app within this max times, consider it lost.
+# livy.server.kubernetes.app-lookup.max-failed.times = 120
+# The size of thread pool to monitor all Kubernetes apps.
+# livy.server.kubernetes.app-lookup.thread-pool.size = 4
+# When the cluster is busy, we may fail to launch yarn app in app-lookup-timeout, then it would
+# cause session leakage, so we need to check session leakage.
+# How long to check livy session leakage
+# livy.server.kubernetes.app-leakage.check-timeout = 600s
+# How often to check livy session leakage
+# livy.server.kubernetes.app-leakage.check-interval = 60s
+
+# How often Livy polls KubeApiServer to refresh KubernetesApp state (Pods state, logs, description
+# details, routes, etc...)
+# livy.server.kubernetes.poll-interval = 15s
+
+# Whether Livy fetches executor pods each poll cycle (used for executor log URLs and
+# per-executor diagnostics). Disable on large clusters; driver pod is polled regardless.
+# livy.server.kubernetes.executor-tracking.enabled = true
+
+# Whether Livy fetches the driver pod's Kubernetes logs each poll cycle. When disabled,
+# /sessions/:id/log and /batches/:id/log will not include any Kubernetes driver log lines
+# at all. Disable if driver logs are collected externally and those repeated log calls
+# are not needed.
+# livy.server.kubernetes.driver-log-polling.enabled = true
+
+# Weather to create Kubernetes Nginx Ingress for Spark UI. If set to true, configure the desired
+# options below
+# livy.server.kubernetes.ingress.create = false
+# Kubernetes Nginx Ingress protocol. If set to https refer Ingress TLS section below
+# livy.server.kubernetes.ingress.protocol = http
+# Kubernetes Nginx Ingress host. Be sure to set it to the FQDN of your Nginx Ingress Controller
+# proxy server
+# livy.server.kubernetes.ingress.host = localhost
+# Kubernetes secret name for Nginx Ingress TLS. Is omitted if 'livy.server.kubernetes.ingress.protocol'
+# is not https
+# livy.server.kubernetes.ingress.tls.secretName = spark-cluster-tls
+# Kubernetes Nginx Ingress additional configuration snippet for specific config options
+# livy.server.kubernetes.ingress.additionalConfSnippet =
+# Kubernetes Nginx Ingress additional annotations for specific config options, eg. for configuring
+# basic auth of external oauth2 proxy. Format: annotation1=value1;annotation2=value2;...
+# livy.server.kubernetes.ingress.additionalAnnotations =
+
+# Set to true to enable Grafana Loki integration and configure options below
+livy.server.kubernetes.grafana.loki.enabled = false
+# Grafana UI root endpoint to build links based on
+# livy.server.kubernetes.grafana.url = http://localhost:3000
+# Grafana Datasource name for Loki
+# livy.server.kubernetes.grafana.loki.datasource = loki
+# Time range from now to past to get logs for
+# livy.server.kubernetes.grafana.timeRange = 6h
+
+# Used to build links to Spark History Server pages on Spark App completion (Kubernetes only)
+# livy.ui.history-server-url = http://spark-history-server

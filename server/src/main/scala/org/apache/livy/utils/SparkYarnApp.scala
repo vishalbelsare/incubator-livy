@@ -16,17 +16,17 @@
  */
 package org.apache.livy.utils
 
-import java.util.concurrent.TimeoutException
+import java.util
 
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
-import scala.collection.mutable.ArrayBuffer
 import scala.concurrent._
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import scala.util.Try
 import scala.util.control.NonFatal
 
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsRequest
 import org.apache.hadoop.yarn.api.records.{ApplicationId, ApplicationReport, FinalApplicationStatus, YarnApplicationState}
 import org.apache.hadoop.yarn.client.api.YarnClient
 import org.apache.hadoop.yarn.conf.YarnConfiguration
@@ -70,13 +70,23 @@ object SparkYarnApp extends Logging {
 
   private var sessionLeakageCheckInterval: Long = _
 
+  /**
+   * Build a GetApplicationsRequest filtered by Spark application type and tags.
+   * Tags are normalized to lowercase to match YARN's tag storage behavior.
+   */
+  private def createGetApplicationsRequest(appTags: util.Set[String]): GetApplicationsRequest = {
+    val normalizedTags = new util.HashSet[String]()
+    appTags.asScala.foreach(tag => normalizedTags.add(tag.toLowerCase))
+    val request = GetApplicationsRequest.newInstance(appType)
+    request.setApplicationTags(normalizedTags)
+    request
+  }
+
   private val leakedAppsGCThread = new Thread() {
     override def run(): Unit = {
-      val client = {
-        mockYarnClient match {
-          case Some(client) => client
-          case None => yarnClient
-        }
+      val client = mockYarnClient match {
+        case Some(client) => client
+        case None => yarnClient
       }
 
       while (true) {
@@ -84,13 +94,16 @@ object SparkYarnApp extends Logging {
           // kill the app if found it and remove it if exceeding a threshold
           val iter = leakedAppTags.entrySet().iterator()
           val now = System.currentTimeMillis()
-          val apps = client.getApplications(appType).asScala
+          val tagSet = new util.HashSet[String](leakedAppTags.keySet())
+          val request = createGetApplicationsRequest(tagSet)
+          val apps = client.getApplications(request).asScala
 
           while(iter.hasNext) {
             var isRemoved = false
             val entry = iter.next()
+            val tagLowerCase = entry.getKey.toLowerCase()
 
-            apps.find(_.getApplicationTags.contains(entry.getKey))
+            apps.find(_.getApplicationTags.contains(tagLowerCase))
               .foreach({ e =>
                 info(s"Kill leaked app ${e.getApplicationId}")
                 client.killApplication(e.getApplicationId)
@@ -141,8 +154,8 @@ class SparkYarnApp private[utils] (
   private var yarnDiagnostics: IndexedSeq[String] = IndexedSeq.empty[String]
 
   override def log(): IndexedSeq[String] =
-    ("stdout: " +: process.map(_.inputLines).getOrElse(ArrayBuffer.empty[String])) ++
-    ("\nstderr: " +: process.map(_.errorLines).getOrElse(ArrayBuffer.empty[String])) ++
+    ("stdout: " +: process.map(_.inputLines).getOrElse(IndexedSeq.empty[String])) ++
+    ("\nstderr: " +: process.map(_.errorLines).getOrElse(IndexedSeq.empty[String])) ++
     ("\nYARN Diagnostics: " +: yarnDiagnostics)
 
   override def kill(): Unit = synchronized {
@@ -155,8 +168,9 @@ class SparkYarnApp private[utils] (
         // We cannot kill the YARN app without the app id.
         // There's a chance the YARN app hasn't been submitted during a livy-server failure.
         // We don't want a stuck session that can't be deleted. Emit a warning and move on.
-        case _: TimeoutException | _: InterruptedException =>
+        case e @ (_: InterruptedException | NonFatal(_)) =>
           warn("Deleting a session while its YARN application is not found.")
+          warn(s"Reason: ${e.getClass.getSimpleName} - ${e.getMessage}")
           yarnAppMonitorThread.interrupt()
       } finally {
         process.foreach(_.destroy())
@@ -197,10 +211,10 @@ class SparkYarnApp private[utils] (
     }
 
     val appTagLowerCase = appTag.toLowerCase()
-
-    // FIXME Should not loop thru all YARN applications but YarnClient doesn't offer an API.
-    // Consider calling rmClient in YarnClient directly.
-    yarnClient.getApplications(appType).asScala.find(_.getApplicationTags.contains(appTagLowerCase))
+    val appTags: util.Set[String] = util.Collections.singleton(appTagLowerCase)
+    val request = createGetApplicationsRequest(appTags)
+    val applicationReports = yarnClient.getApplications(request)
+    applicationReports.asScala.find(_.getApplicationTags.contains(appTagLowerCase))
     match {
       case Some(app) => app.getApplicationId
       case None =>
@@ -315,9 +329,12 @@ class SparkYarnApp private[utils] (
             val latestAppInfo = {
               val attempt =
                 yarnClient.getApplicationAttemptReport(appReport.getCurrentApplicationAttemptId)
-              val driverLogUrl =
+              val driverLogUrl = if (state == SparkApp.State.FINISHED) {
+                None
+              } else {
                 Try(yarnClient.getContainerReport(attempt.getAMContainerId).getLogUrl)
                   .toOption
+              }
               AppInfo(driverLogUrl, Option(appReport.getTrackingUrl))
             }
 
@@ -342,11 +359,11 @@ class SparkYarnApp private[utils] (
       debug(s"$appId $state ${yarnDiagnostics.mkString(" ")}")
     } catch {
       case _: InterruptedException =>
-        yarnDiagnostics = ArrayBuffer("Session stopped by user.")
+        yarnDiagnostics = IndexedSeq("Session stopped by user.")
         changeState(SparkApp.State.KILLED)
       case NonFatal(e) =>
         error(s"Error whiling refreshing YARN state", e)
-        yarnDiagnostics = ArrayBuffer(e.getMessage)
+        yarnDiagnostics = IndexedSeq(e.getMessage)
         changeState(SparkApp.State.FAILED)
     }
   }

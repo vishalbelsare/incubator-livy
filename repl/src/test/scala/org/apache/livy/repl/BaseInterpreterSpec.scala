@@ -17,11 +17,14 @@
 
 package org.apache.livy.repl
 
-import org.scalatest.{FlatSpec, Matchers}
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
 
 import org.apache.livy.LivyBaseUnitTestSuite
+import org.apache.livy.test.ScalaVersionAware
 
-abstract class BaseInterpreterSpec extends FlatSpec with Matchers with LivyBaseUnitTestSuite {
+abstract class BaseInterpreterSpec
+    extends AnyFlatSpec with Matchers with LivyBaseUnitTestSuite with ScalaVersionAware {
 
   def createInterpreter(): Interpreter
 

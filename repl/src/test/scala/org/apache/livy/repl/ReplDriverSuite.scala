@@ -26,23 +26,27 @@ import scala.language.postfixOps
 import org.apache.spark.launcher.SparkLauncher
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
-import org.scalatest.FunSuite
 import org.scalatest.concurrent.Eventually._
+import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.livy._
+import org.apache.livy.client.common.TestUtils
 import org.apache.livy.rsc.{PingJob, RSCClient, RSCConf}
 import org.apache.livy.sessions.Spark
 
-class ReplDriverSuite extends FunSuite with LivyBaseUnitTestSuite {
+class ReplDriverSuite extends AnyFunSuite with LivyBaseUnitTestSuite {
 
   private implicit val formats = DefaultFormats
 
   test("start a repl session using the rsc") {
     val client = new LivyClientBuilder()
-      .setConf(SparkLauncher.DRIVER_MEMORY, "512m")
+      .setConf(SparkLauncher.DRIVER_MEMORY, "1024m")
       .setConf(SparkLauncher.DRIVER_EXTRA_CLASSPATH, sys.props("java.class.path"))
       .setConf(SparkLauncher.EXECUTOR_EXTRA_CLASSPATH, sys.props("java.class.path"))
       .setConf(RSCConf.Entry.LIVY_JARS.key(), "")
+      .setConf(RSCConf.Entry.RPC_SERVER_ADDRESS.key(), TestUtils.TEST_BIND_HOST)
+      .setConf(TestUtils.SPARK_DRIVER_HOST, TestUtils.TEST_BIND_HOST)
+      .setConf(TestUtils.SPARK_DRIVER_BIND_ADDRESS, TestUtils.TEST_BIND_HOST)
       .setURI(new URI("rsc:/"))
       .setConf(RSCConf.Entry.DRIVER_CLASS.key(), classOf[ReplDriver].getName())
       .setConf(RSCConf.Entry.SESSION_KIND.key(), Spark.toString)

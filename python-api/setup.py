@@ -23,16 +23,19 @@ CLASSIFIERS = [
     'Development Status :: 1 - Planning',
     'Intended Audience :: Developers',
     'Operating System :: OS Independent',
-    'Programming Language :: Python :: 2.7',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.8',
+    'Programming Language :: Python :: 3.9',
+    'Programming Language :: Python :: 3.10',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: 3.14',
     'Topic :: Software Development :: Libraries :: Python Modules',
 ]
 
 requirements = [
     'cloudpickle>=0.2.1',
-    'configparser>=3.5.0',
-    'future>=0.15.2',
-    'futures>=3.0.5',
-    'mock~=3.0.5',
     'requests>=2.10.0',
     'responses>=0.5.1',
     'requests-kerberos>=0.11.0',
@@ -40,20 +43,21 @@ requirements = [
 
 setup(
     name='livy-python-api',
-    version="0.8.0-incubating-SNAPSHOT",
-    packages=["livy", "livy-tests"],
+    # PEP 440 disallows Maven-style `-SNAPSHOT` suffixes; use `.dev0` instead,
+    # which is the canonical Python equivalent for "pre-release under active
+    # development". Modern pip (>= 24) rejects `1.0.0-SNAPSHOT` outright with
+    # `Invalid version: '1.0.0-SNAPSHOT'` when parsing this package.
+    version="1.0.0.dev0",
+    packages=["livy"],
     package_dir={
         "": "src/main/python",
-        "livy-tests": "src/test/python/livy-tests",
     },
-    url='https://github.com/apache/incubator-livy',
-    author_email='user@livy.incubator.apache.org',
+    url='https://github.com/apache/livy',
+    author_email='user@livy.apache.org',
     license='Apache License, Version 2.0',
     description=DESCRIPTION,
     platforms=['any'],
     keywords='livy pyspark development',
     classifiers=CLASSIFIERS,
     install_requires=requirements,
-    setup_requires=['pytest-runner', 'flake8'],
-    tests_require=['pytest']
 )

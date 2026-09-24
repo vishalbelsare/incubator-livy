@@ -17,19 +17,33 @@
 
 package org.apache.livy.utils
 
-import scala.collection.JavaConverters._
+import java.io.{File, FileInputStream, IOException}
+import java.util.Properties
 
-import org.apache.livy.LivyConf
+import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
+
+import org.apache.hadoop.conf.Configuration
+
+import org.apache.livy.{LivyConf, Logging}
 
 object AppInfo {
   val DRIVER_LOG_URL_NAME = "driverLogUrl"
   val SPARK_UI_URL_NAME = "sparkUiUrl"
+  val EXECUTORS_LOG_URLS_NAME = "executorLogUrls"
 }
 
-case class AppInfo(var driverLogUrl: Option[String] = None, var sparkUiUrl: Option[String] = None) {
+case class AppInfo(
+  var driverLogUrl: Option[String] = None,
+  var sparkUiUrl: Option[String] = None,
+  var executorLogUrls: Option[String] = None) {
   import AppInfo._
   def asJavaMap: java.util.Map[String, String] =
-    Map(DRIVER_LOG_URL_NAME -> driverLogUrl.orNull, SPARK_UI_URL_NAME -> sparkUiUrl.orNull).asJava
+    Map(
+      DRIVER_LOG_URL_NAME -> driverLogUrl.orNull,
+      SPARK_UI_URL_NAME -> sparkUiUrl.orNull,
+      EXECUTORS_LOG_URLS_NAME -> executorLogUrls.orNull
+    ).asJava
 }
 
 trait SparkAppListener {
@@ -46,14 +60,75 @@ trait SparkAppListener {
 /**
  * Provide factory methods for SparkApp.
  */
-object SparkApp {
+object SparkApp extends Logging {
   private val SPARK_YARN_TAG_KEY = "spark.yarn.tags"
-
+  val SPARK_KUBERNETES_NAMESPACE_KEY = "spark.kubernetes.namespace"
   object State extends Enumeration {
     val STARTING, RUNNING, FINISHED, FAILED, KILLED = Value
   }
   type State = State.Value
 
+  val DEFAULT_KUBERNETES_NAMESPACE = "default"
+
+  /**
+   * Resolve the Kubernetes namespace a Spark application should run in.
+   *
+   * The namespace is looked up, in order of precedence, from:
+   *   1. the session's Spark configuration ([[SPARK_KUBERNETES_NAMESPACE_KEY]]),
+   *   2. `spark-defaults.conf` in the Spark config directory (`$SPARK_CONF_DIR` if set,
+   *      otherwise `$SPARK_HOME/conf`), if present,
+   *   3. the [[DEFAULT_KUBERNETES_NAMESPACE]] fallback.
+   *
+   * The namespace is only meaningful on Kubernetes, so for any other cluster
+   * manager (YARN, local) an empty string is returned without touching the
+   * filesystem.
+   */
+  def getNamespace(conf: Map[String, String], livyConf: LivyConf): String = {
+    if (!livyConf.isRunningOnKubernetes()) {
+      return ""
+    }
+    conf.get(SPARK_KUBERNETES_NAMESPACE_KEY).filter(_.nonEmpty).getOrElse {
+      namespaceFromSparkDefaults(livyConf).getOrElse(DEFAULT_KUBERNETES_NAMESPACE)
+    }
+  }
+
+  /**
+   * Resolve the Spark configuration directory the same way Spark's launch scripts do:
+   * honor `$SPARK_CONF_DIR` if set, otherwise fall back to `$SPARK_HOME/conf`. Livy runs
+   * spark-submit as a child process, which reads spark-defaults.conf from this directory;
+   * resolving it identically here keeps the monitored namespace consistent with where the
+   * driver pod is actually created.
+   */
+  private def sparkConfDir(livyConf: LivyConf): Option[String] = {
+    sys.env.get("SPARK_CONF_DIR").filter(_.nonEmpty)
+      .orElse(livyConf.sparkHome().map(home => s"$home${File.separator}conf"))
+  }
+
+  private def namespaceFromSparkDefaults(livyConf: LivyConf): Option[String] = {
+    sparkConfDir(livyConf).flatMap { confDir =>
+      val sparkDefaults = new File(confDir, "spark-defaults.conf")
+      if (!sparkDefaults.isFile) {
+        None
+      } else {
+        val in = new FileInputStream(sparkDefaults)
+        try {
+          val properties = new Properties()
+          properties.load(in)
+          Option(properties.getProperty(SPARK_KUBERNETES_NAMESPACE_KEY)).filter(_.nonEmpty)
+        } catch {
+          case NonFatal(e) =>
+            // A malformed spark-defaults.conf (e.g. an invalid unicode escape, which
+            // java.util.Properties rejects) must not abort session creation; fall
+            // back to the default namespace instead.
+            warn(s"Could not read $sparkDefaults for the Kubernetes namespace; " +
+              s"falling back to the default namespace: ${e.getMessage}")
+            None
+        } finally {
+          in.close()
+        }
+      }
+    }
+  }
   /**
    * Return cluster manager dependent SparkConf.
    *
@@ -65,19 +140,73 @@ object SparkApp {
       uniqueAppTag: String,
       livyConf: LivyConf,
       sparkConf: Map[String, String]): Map[String, String] = {
-    if (livyConf.isRunningOnYarn()) {
+    val baseConf = if (livyConf.isRunningOnYarn()) {
       val userYarnTags = sparkConf.get(SPARK_YARN_TAG_KEY).map("," + _).getOrElse("")
       val mergedYarnTags = uniqueAppTag + userYarnTags
       sparkConf ++ Map(
         SPARK_YARN_TAG_KEY -> mergedYarnTags,
         "spark.yarn.submit.waitAppCompletion" -> "false")
+    } else if (livyConf.isRunningOnKubernetes()) {
+      import KubernetesConstants._
+      sparkConf ++ Map(
+        s"spark.kubernetes.driver.label.$SPARK_APP_TAG_LABEL" -> uniqueAppTag,
+        s"spark.kubernetes.executor.label.$SPARK_APP_TAG_LABEL" -> uniqueAppTag,
+        "spark.kubernetes.submission.waitAppCompletion" -> "false",
+        "spark.ui.proxyBase" -> s"/$uniqueAppTag")
     } else {
       sparkConf
+    }
+    enrichHiveMetastoreSslConf(baseConf, livyConf)
+  }
+
+  /**
+   * Reads HMS SSL passwords from LivyConf's local JCEKS provider and injects them as
+   * spark.hadoop.* properties for YARN/K8s drivers and executors. The incoming Spark
+   * conf (including any user-supplied credential provider path) is preserved; only
+   * HMS SSL properties are merged via `conf ++ sslProps`.
+   *
+   * No-op if no credential provider path is configured, or if it resolves to
+   * unrelated (non-HMS) secrets; in either case the original conf is returned
+   * untouched so any user-supplied provider path (e.g. an HDFS-backed one used
+   * for other credentials) is preserved.
+   */
+  private def enrichHiveMetastoreSslConf(
+      conf: Map[String, String],
+      livyConf: LivyConf): Map[String, String] = {
+    val credentialProviderPath = livyConf.get(LivyConf.HADOOP_CREDENTIAL_PROVIDER_PATH)
+    if (credentialProviderPath == null || credentialProviderPath.isEmpty) {
+      return conf
+    }
+    val hadoopConf = new Configuration()
+    hadoopConf.set("hadoop.security.credential.provider.path", credentialProviderPath)
+    val hmsSslKeys = Seq("hive.metastore.keystore.password", "hive.metastore.truststore.password")
+    val sslProps =
+      try {
+        hmsSslKeys.flatMap { key =>
+          Option(hadoopConf.getPassword(key)).map(_.mkString) match {
+            case Some(password) if password.nonEmpty => Some(s"spark.hadoop.$key" -> password)
+            case _ => None
+          }
+        }.toMap
+      } catch {
+        case e: IOException =>
+          warn(s"Could not resolve Hive Metastore SSL credentials from provider path " +
+            s"$credentialProviderPath: ${e.getMessage}")
+          Map.empty[String, String]
+      }
+
+    if (sslProps.isEmpty) {
+      // Nothing HMS-related found (or resolution failed); leave the user's
+      // provider path config exactly as it was.
+      conf
+    } else {
+      conf ++ sslProps
     }
   }
 
   /**
-   * Return a SparkApp object to control the underlying Spark application via YARN or spark-submit.
+   * Return a SparkApp object to control the underlying Spark application via YARN, Kubernetes
+   * or spark-submit.
    *
    * @param uniqueAppTag A tag that can uniquely identify the application.
    */
@@ -86,11 +215,15 @@ object SparkApp {
       appId: Option[String],
       process: Option[LineBufferedProcess],
       livyConf: LivyConf,
-      listener: Option[SparkAppListener]): SparkApp = {
+      listener: Option[SparkAppListener],
+      extrasMap: Map[String, String]): SparkApp = {
     if (livyConf.isRunningOnYarn()) {
       new SparkYarnApp(uniqueAppTag, appId, process, listener, livyConf)
+    } else if (livyConf.isRunningOnKubernetes()) {
+      new SparkKubernetesApp(uniqueAppTag, appId, process, listener, livyConf, extrasMap)
     } else {
-      require(process.isDefined, "process must not be None when Livy master is not YARN.")
+      require(process.isDefined, "process must not be None when Livy master is not YARN or" +
+        "Kubernetes.")
       new SparkProcApp(process.get, listener)
     }
   }

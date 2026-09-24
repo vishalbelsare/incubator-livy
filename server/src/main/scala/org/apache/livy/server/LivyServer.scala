@@ -30,7 +30,7 @@ import scala.concurrent.Future
 import org.apache.hadoop.security.{SecurityUtil, UserGroupInformation}
 import org.apache.hadoop.security.authentication.server._
 import org.eclipse.jetty.servlet.FilterHolder
-import org.scalatra.{NotFound, ScalatraServlet}
+import org.scalatra.{ApiFormats, NotFound, ScalatraServlet}
 import org.scalatra.metrics.MetricsBootstrap
 import org.scalatra.metrics.MetricsSupportExtensions._
 import org.scalatra.servlet.{MultipartConfig, ServletApiImplicits}
@@ -39,12 +39,12 @@ import org.apache.livy._
 import org.apache.livy.server.auth.LdapAuthenticationHandlerImpl
 import org.apache.livy.server.batch.BatchSessionServlet
 import org.apache.livy.server.interactive.InteractiveSessionServlet
-import org.apache.livy.server.recovery.{SessionStore, StateStore, ZooKeeperManager}
+import org.apache.livy.server.recovery.{RecoveryServlet, SessionStore, StateStore, ZooKeeperManager}
 import org.apache.livy.server.ui.UIServlet
 import org.apache.livy.sessions.{BatchSessionManager, InteractiveSessionManager}
 import org.apache.livy.sessions.SessionManager.SESSION_RECOVERY_MODE_OFF
+import org.apache.livy.utils.{SparkKubernetesApp, SparkYarnApp}
 import org.apache.livy.utils.LivySparkUtils._
-import org.apache.livy.utils.SparkYarnApp
 
 class LivyServer extends Logging {
 
@@ -142,10 +142,12 @@ class LivyServer extends Logging {
 
     testRecovery(livyConf)
 
-    // Initialize YarnClient ASAP to save time.
+    // Initialize YarnClient/KubernetesClient ASAP to save time.
     if (livyConf.isRunningOnYarn()) {
       SparkYarnApp.init(livyConf)
       Future { SparkYarnApp.yarnClient }
+    } else if (livyConf.isRunningOnKubernetes()) {
+      SparkKubernetesApp.init(livyConf)
     }
 
     if (livyConf.get(LivyConf.RECOVERY_STATE_STORE) == "zookeeper") {
@@ -174,17 +176,34 @@ class LivyServer extends Logging {
       }
     }
 
+    // Operator endpoint: re-scan the recovery state store and import any sessions
+    // written by another Livy server. Guarded by livy.superusers.
+    val recoveryServlet = new RecoveryServlet(
+      livyConf, accessManager, interactiveSessionManager, batchSessionManager)
+
     // Servlet for hosting static files such as html, css, and js
     // Necessary since Jetty cannot set it's resource base inside a jar
     // Returns 404 if the file does not exist
-    val staticResourceServlet = new ScalatraServlet {
+    val staticResourceServlet = new ScalatraServlet with ApiFormats {
+
+      addMimeMapping("image/png", "png")
+      addMimeMapping("application/vnd.ms-fontobject", "eot")
+      addMimeMapping("image/svg+xml", "svg")
+      addMimeMapping("font/ttf", "ttf")
+      addMimeMapping("font/woff", "woff")
+      addMimeMapping("font/woff2", "woff2")
+
       get("/*") {
         val fileName = params("splat")
         val notFoundMsg = "File not found"
 
         if (!fileName.isEmpty) {
           getClass.getResourceAsStream(s"ui/static/$fileName") match {
-            case is: InputStream => new BufferedInputStream(is)
+            case is: InputStream => {
+              val extension = fileName.split("\\.").last
+              contentType = formats(extension)
+              new BufferedInputStream(is)
+            }
             case null => NotFound(notFoundMsg)
           }
         } else {
@@ -215,7 +234,7 @@ class LivyServer extends Logging {
         override def contextInitialized(sce: ServletContextEvent): Unit = {
           try {
             val context = sce.getServletContext()
-            context.initParameters(org.scalatra.EnvironmentKey) = livyConf.get(ENVIRONMENT)
+            context.setInitParameter(org.scalatra.EnvironmentKey, livyConf.get(ENVIRONMENT))
 
             val interactiveServlet = new InteractiveSessionServlet(
               interactiveSessionManager, sessionStore, livyConf, accessManager)
@@ -238,8 +257,14 @@ class LivyServer extends Logging {
             }
 
             context.mountMetricsAdminServlet("/metrics")
+            if (livyConf.getBoolean(SESSION_METRICS_ENABLED)) {
+              LivySessionMetrics.register(
+                metricRegistry, interactiveSessionManager, batchSessionManager)
+            }
 
             mount(context, livyVersionServlet, "/version/*")
+
+            mount(context, recoveryServlet, "/recovery/*")
           } catch {
             case e: Throwable =>
               error("Exception thrown when initializing server", e)
@@ -248,6 +273,12 @@ class LivyServer extends Logging {
         }
 
       })
+
+    if (livyConf.getBoolean(SECURITY_HEADERS_ENABLED)) {
+      info("Adding security headers is enabled.")
+      val securityHeadersHolder = new FilterHolder(new SecurityHeadersFilter(livyConf))
+      server.context.addFilter(securityHeadersHolder, "/*", EnumSet.allOf(classOf[DispatcherType]))
+    }
 
     livyConf.get(AUTH_TYPE) match {
       case authType @ KerberosAuthenticationHandler.TYPE =>
@@ -415,10 +446,10 @@ class LivyServer extends Logging {
   }
 
   private[livy] def testRecovery(livyConf: LivyConf): Unit = {
-    if (!livyConf.isRunningOnYarn()) {
-      // If recovery is turned on but we are not running on YARN, quit.
+    if (!livyConf.isRunningOnYarn() && !livyConf.isRunningOnKubernetes()) {
+      // If recovery is turned on, and we are not running on YARN or Kubernetes, quit.
       require(livyConf.get(LivyConf.RECOVERY_MODE) == SESSION_RECOVERY_MODE_OFF,
-        "Session recovery requires YARN.")
+        "Session recovery requires YARN or Kubernetes.")
     }
   }
 }

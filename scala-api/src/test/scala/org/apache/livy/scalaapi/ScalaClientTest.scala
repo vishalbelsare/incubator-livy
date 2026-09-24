@@ -33,13 +33,15 @@ import scala.util.{Failure, Success}
 
 import org.apache.spark.SparkFiles
 import org.apache.spark.launcher.SparkLauncher
-import org.scalatest.{BeforeAndAfter, FunSuite}
+import org.scalatest.BeforeAndAfter
 import org.scalatest.concurrent.ScalaFutures
+import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.livy.LivyBaseUnitTestSuite
+import org.apache.livy.client.common.TestUtils
 import org.apache.livy.rsc.RSCConf.Entry._
 
-class ScalaClientTest extends FunSuite
+class ScalaClientTest extends AnyFunSuite
   with ScalaFutures
   with BeforeAndAfter
   with LivyBaseUnitTestSuite {
@@ -182,12 +184,15 @@ object ScalaClientTest {
     } else {
       val classpath: String = System.getProperty("java.class.path")
       conf.put("spark.app.name", "SparkClientSuite Remote App")
-      conf.put(SparkLauncher.DRIVER_MEMORY, "512m")
+      conf.put(SparkLauncher.DRIVER_MEMORY, "1024m")
       conf.put(SparkLauncher.DRIVER_EXTRA_CLASSPATH, classpath)
       conf.put(SparkLauncher.EXECUTOR_EXTRA_CLASSPATH, classpath)
     }
     conf.put(CLIENT_SHUTDOWN_TIMEOUT.key(), "30s")
     conf.put(LIVY_JARS.key, "")
+    conf.put(RPC_SERVER_ADDRESS.key(), TestUtils.TEST_BIND_HOST)
+    conf.put(TestUtils.SPARK_DRIVER_HOST, TestUtils.TEST_BIND_HOST)
+    conf.put(TestUtils.SPARK_DRIVER_BIND_ADDRESS, TestUtils.TEST_BIND_HOST)
     conf
   }
 

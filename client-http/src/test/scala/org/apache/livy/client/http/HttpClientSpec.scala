@@ -18,7 +18,7 @@
 package org.apache.livy.client.http
 
 import java.io.{File, InputStream}
-import java.net.{InetAddress, URI}
+import java.net.URI
 import java.nio.file.{Files, Paths}
 import java.util.concurrent.{Future => JFuture, _}
 import java.util.concurrent.atomic.AtomicLong
@@ -30,12 +30,13 @@ import scala.concurrent.{ExecutionContext, Future}
 import org.mockito.ArgumentCaptor
 import org.mockito.Matchers.{eq => meq, _}
 import org.mockito.Mockito._
-import org.scalatest.{BeforeAndAfterAll, FunSpecLike}
+import org.scalatest.BeforeAndAfterAll
+import org.scalatest.funspec.AnyFunSpecLike
 import org.scalatra.LifeCycle
 import org.scalatra.servlet.ScalatraListener
 
 import org.apache.livy._
-import org.apache.livy.client.common.{BufferUtils, Serializer}
+import org.apache.livy.client.common.{BufferUtils, Serializer, TestUtils}
 import org.apache.livy.client.common.HttpMessages._
 import org.apache.livy.server.{AccessManager, WebServer}
 import org.apache.livy.server.interactive.{InteractiveSession, InteractiveSessionServlet}
@@ -49,7 +50,7 @@ import org.apache.livy.utils.AppInfo
  * module, which implements the client session backend. The client servlet has some functionality
  * overridden to avoid creating sub-processes for each seession.
  */
-class HttpClientSpec extends FunSpecLike with BeforeAndAfterAll with LivyBaseUnitTestSuite {
+class HttpClientSpec extends AnyFunSpecLike with BeforeAndAfterAll with LivyBaseUnitTestSuite {
 
   import HttpClientSpec._
 
@@ -62,7 +63,7 @@ class HttpClientSpec extends FunSpecLike with BeforeAndAfterAll with LivyBaseUni
 
   override def beforeAll(): Unit = {
     super.beforeAll()
-    server = new WebServer(new LivyConf(), "0.0.0.0", 0)
+    server = new WebServer(new LivyConf(), TestUtils.TEST_BIND_HOST, 0)
 
     server.context.setResourceBase("src/main/org/apache/livy/server")
     server.context.setInitParameter(ScalatraListener.LifeCycleKey,
@@ -88,9 +89,7 @@ class HttpClientSpec extends FunSpecLike with BeforeAndAfterAll with LivyBaseUni
   describe("HTTP client library") {
 
     it("should create clients") {
-      // WebServer does this internally instead of respecting "0.0.0.0", so try to use the same
-      // address.
-      val uri = s"http://${InetAddress.getLocalHost.getHostAddress}:${server.port}/"
+      val uri = s"http://${server.host}:${server.port}/"
       client = new LivyClientBuilder(false).setURI(new URI(uri)).build()
     }
 
@@ -183,7 +182,8 @@ class HttpClientSpec extends FunSpecLike with BeforeAndAfterAll with LivyBaseUni
 
     withClient("should connect to existing sessions") {
       var sid = client.asInstanceOf[HttpClient].getSessionId()
-      val uri = s"http://${InetAddress.getLocalHost.getHostAddress}:${server.port}" +
+      // Match the loopback address the WebServer bound to (see beforeAll).
+      val uri = s"http://${server.host}:${server.port}" +
         s"${LivyConnection.SESSIONS_URI}/$sid"
       val newClient = new LivyClientBuilder(false).setURI(new URI(uri)).build()
       newClient.stop(false)
@@ -279,8 +279,21 @@ private class HttpClientTestBootstrap extends LifeCycle {
         when(session.state).thenReturn(SessionState.Idle)
         when(session.proxyUser).thenReturn(None)
         when(session.kind).thenReturn(Spark)
+        when(session.driverMemory).thenReturn(None)
+        when(session.driverCores).thenReturn(None)
+        when(session.executorMemory).thenReturn(None)
+        when(session.executorCores).thenReturn(None)
+        when(session.numExecutors).thenReturn(None)
+        when(session.proxyUser).thenReturn(None)
+        when(session.queue).thenReturn(None)
+        when(session.conf).thenReturn(Map("" -> ""))
+        when(session.archives).thenReturn(List())
+        when(session.files).thenReturn(List())
+        when(session.jars).thenReturn(List())
+        when(session.pyFiles).thenReturn(List())
         when(session.stop()).thenReturn(Future.successful(()))
         when(session.ttl).thenReturn(None)
+        when(session.idleTimeout).thenReturn(None)
         require(HttpClientSpec.session == null, "Session already created?")
         HttpClientSpec.session = session
         session

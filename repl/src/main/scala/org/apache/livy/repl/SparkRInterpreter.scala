@@ -183,6 +183,11 @@ class SparkRInterpreter(
   override def kind: String = "sparkr"
   private[this] val isStarted = new CountDownLatch(1)
 
+  if (sparkMajorVersion >= 4) {
+    warn("SparkR is deprecated in Spark 4 (SPARK-49347); the SparkR interpreter " +
+      "may be removed in a future Spark release.")
+  }
+
   final override protected def waitUntilReady(): Unit = {
     // Set the option to catch and ignore errors instead of halting.
     sendRequest("options(error = dump.frames)")
@@ -201,10 +206,8 @@ class SparkRInterpreter(
       sendRequest("""assign(".sc", SparkR:::callJStatic("org.apache.livy.repl.SparkRInterpreter", "getSparkContext"), envir = SparkR:::.sparkREnv)""")
       sendRequest("""assign("sc", get(".sc", envir = SparkR:::.sparkREnv), envir=.GlobalEnv)""")
 
-      if (sparkMajorVersion >= 2) {
-        sendRequest("""assign(".sparkRsession", SparkR:::callJStatic("org.apache.livy.repl.SparkRInterpreter", "getSparkSession"), envir = SparkR:::.sparkREnv)""")
-        sendRequest("""assign("spark", get(".sparkRsession", envir = SparkR:::.sparkREnv), envir=.GlobalEnv)""")
-      }
+      sendRequest("""assign(".sparkRsession", SparkR:::callJStatic("org.apache.livy.repl.SparkRInterpreter", "getSparkSession"), envir = SparkR:::.sparkREnv)""")
+      sendRequest("""assign("spark", get(".sparkRsession", envir = SparkR:::.sparkREnv), envir=.GlobalEnv)""")
 
       sendRequest("""assign(".sqlc", SparkR:::callJStatic("org.apache.livy.repl.SparkRInterpreter", "getSQLContext"), envir = SparkR:::.sparkREnv)""")
       sendRequest("""assign("sqlContext", get(".sqlc", envir = SparkR:::.sparkREnv), envir = .GlobalEnv)""")
